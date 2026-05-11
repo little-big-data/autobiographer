@@ -1,9 +1,10 @@
 """Geo Explorer — unified geographic visualization page.
 
-Consolidates three views of the same location-enriched dataset:
+Consolidates four views of the same location-enriched dataset:
 * **3D Globe** — Pydeck ScatterplotLayer + ColumnLayer with country/state overlays
   and cinematic flythrough recording.
-* **2D Map** — Plotly scatter_map (carto-darkmatter, no token required).
+* **2D Map** — Plotly scatter_map (carto-darkmatter, no token required).  Includes
+  a "By City" breakdown panel with a sortable city stats table and detail card.
 * **US States** — Plotly choropleth coloured by scrobble density per US state.
 * **Table** — Paginated artist-city summary table.
 
@@ -28,8 +29,11 @@ import pydeck as pdk
 import streamlit as st
 from pandas import DataFrame
 
+from analysis_utils import get_top_entities
 from components.share import render_share_button
 from components.theme import (
+    ACCENT_CYAN,
+    ACCENT_INDIGO,
     COLORWAY,
     MAP_COLUMN_DEFAULT_RGBA,
     MAP_COUNTRY_BORDER_RGB,
@@ -40,7 +44,6 @@ from components.theme import (
     apply_dark_theme,
 )
 from pages.artist_geography import (
-    build_artist_city_detail,
     build_artist_city_table,
     build_map_data,
 )
@@ -57,6 +60,9 @@ _VIEW_3D = "🌐 3D Globe"
 _VIEW_2D = "🗺 2D Map"
 _VIEW_US = "🇺🇸 US States"
 _VIEW_TABLE = "📋 Table"
+
+# Assumed average track duration used for estimated listening time in city breakdown.
+_AVG_TRACK_MINUTES: float = 3.5
 
 _CHECKIN_RGBA = [34, 211, 238, 210]  # cyan — distinct from scrobble spectrum
 
@@ -517,25 +523,38 @@ def _render_2d_map(
         st.info("No data to display. Enable at least one data layer in the Filter panel.")
         return
 
+    # Read breakdown selection set in the Filter popover on the previous render.
+    breakdown = st.session_state.get("geo_breakdown", "By Artist")
+
     map_frames: list[DataFrame] = []
 
     if show_scrobbles and music_df is not None:
-        # music_df is already artist-filtered by the caller; pass "All" so
-        # build_map_data aggregates the pre-filtered data without re-filtering.
-        scrobble_data = build_map_data(music_df, "All")
-        if not scrobble_data.empty:
-            if selected_artist == "All":
-                top_artists = (
-                    scrobble_data.groupby("artist")["plays"].sum().nlargest(_MAP_MAX_ARTISTS).index
+        if breakdown == "By City":
+            city_stats = _build_city_stats(music_df)
+            if not city_stats.empty:
+                map_frames.append(
+                    city_stats[["city", "lat", "lng", "plays"]].assign(layer="Scrobble")
                 )
-                scrobble_data = scrobble_data[scrobble_data["artist"].isin(top_artists)]
-                if len(scrobble_data) < len(build_map_data(music_df, "All")):
-                    st.caption(
-                        f"Scrobble map shows top {_MAP_MAX_ARTISTS} artists. "
-                        "Select a specific artist to see all locations."
+        else:
+            # music_df is already artist-filtered by the caller; pass "All" so
+            # build_map_data aggregates the pre-filtered data without re-filtering.
+            scrobble_data = build_map_data(music_df, "All")
+            if not scrobble_data.empty:
+                if selected_artist == "All":
+                    top_artists = (
+                        scrobble_data.groupby("artist")["plays"]
+                        .sum()
+                        .nlargest(_MAP_MAX_ARTISTS)
+                        .index
                     )
-            scrobble_data = scrobble_data.assign(layer="Scrobble")
-            map_frames.append(scrobble_data)
+                    scrobble_data = scrobble_data[scrobble_data["artist"].isin(top_artists)]
+                    if len(scrobble_data) < len(build_map_data(music_df, "All")):
+                        st.caption(
+                            f"Scrobble map shows top {_MAP_MAX_ARTISTS} artists. "
+                            "Select a specific artist to see all locations."
+                        )
+                scrobble_data = scrobble_data.assign(layer="Scrobble")
+                map_frames.append(scrobble_data)
 
     if show_checkins and swarm_df is not None:
         swarm_cols = {"lat", "lng", "city"}
@@ -547,7 +566,13 @@ def _render_2d_map(
                 .reset_index(name="plays")
             )
             if not ci.empty:
-                ci = ci.assign(artist="Check-in", layer="Check-in")
+                # In city mode, label check-ins distinctly so they don't merge with
+                # scrobble city dots that happen to share the same city name.
+                ci = ci.assign(
+                    artist="Check-in",
+                    city="Check-ins" if breakdown == "By City" else ci["city"],
+                    layer="Check-in",
+                )
                 map_frames.append(ci)
 
     if not map_frames:
@@ -556,22 +581,33 @@ def _render_2d_map(
 
     combined = pd.concat(map_frames, ignore_index=True)
 
+    if breakdown == "By City":
+        color_col = "city"
+        title = (
+            f"Plays by City — {selected_artist}" if selected_artist != "All" else "Plays by City"
+        )
+        hover_data: dict = {"plays": True, "city": False, "lat": False, "lng": False}
+    else:
+        color_col = "artist"
+        title = (
+            f"Listening locations — {selected_artist}"
+            if selected_artist != "All"
+            else "Listening locations"
+        )
+        hover_data = {"plays": True, "artist": True, "lat": False, "lng": False}
+
     fig = px.scatter_map(
         combined,
         lat="lat",
         lon="lng",
-        color="artist",
+        color=color_col,
         size="plays",
         size_max=40,
         hover_name="city",
-        hover_data={"plays": True, "artist": True, "lat": False, "lng": False},
+        hover_data=hover_data,
         color_discrete_sequence=COLORWAY,
         zoom=1,
-        title=(
-            f"Listening locations — {selected_artist}"
-            if selected_artist != "All"
-            else "Listening locations"
-        ),
+        title=title,
     )
     fig.update_layout(
         map_style="carto-darkmatter",
@@ -585,23 +621,11 @@ def _render_2d_map(
     top_row = combined.loc[combined["plays"].idxmax()]
     mc1, mc2, mc3 = st.columns(3)
     with mc1:
-        st.metric("Locations", f"{len(combined):,}")
+        st.metric("Cities" if breakdown == "By City" else "Locations", f"{len(combined):,}")
     with mc2:
         st.metric("Total Plays (mapped)", f"{total_plays:,}")
     with mc3:
         st.metric("Top City", str(top_row["city"]))
-
-    if selected_artist != "All" and music_df is not None:
-        city_detail = build_artist_city_detail(music_df, selected_artist)
-        top3 = city_detail.sort_values("plays", ascending=False).head(3)
-        if not top3.empty:
-            st.markdown("**Top cities**")
-            cols = st.columns(min(len(top3), 3))
-            for col, (_, row) in zip(cols, top3.iterrows()):
-                with col:
-                    st.markdown(f"**{row['city']}**")
-                    st.markdown(f"{int(row['plays']):,} plays")
-                    st.markdown(f"First heard: {row['first_listen']}")
 
 
 def _render_us_choropleth(music_df: DataFrame | None, selected_artist: str) -> None:
@@ -693,25 +717,12 @@ def _render_table(music_df: DataFrame | None, selected_artist: str) -> None:
         st.info("No scrobble data loaded.")
         return
 
-    if selected_artist != "All":
-        city_detail = build_artist_city_detail(music_df, selected_artist)
-        if city_detail.empty:
-            st.info("No data available for the selected artist.")
-            return
-        st.caption(
-            f"{selected_artist} — {len(city_detail):,} "
-            f"{'city' if len(city_detail) == 1 else 'cities'}, "
-            "sorted by first listen (newest first)"
-        )
-        st.dataframe(
-            city_detail[["city", "plays", "first_listen"]].rename(
-                columns={"city": "City", "plays": "Plays", "first_listen": "First Listen"}
-            ),
-            width="stretch",
-        )
+    show_mode = st.radio("Show", ["By Artist", "By City"], horizontal=True, key="geo_table_show")
+    if show_mode == "By City":
+        _render_city_breakdown(music_df)
         return
 
-    # All-artists view: paginated table cached by DataFrame identity
+    # By Artist ──────────────────────────────────────────────────────────────
     _cache_key = id(music_df)
     if st.session_state.get("_geo_table_key") != _cache_key:
         st.session_state["_geo_table_cache"] = build_artist_city_table(music_df)
@@ -755,6 +766,276 @@ def _render_table(music_df: DataFrame | None, selected_artist: str) -> None:
         width="stretch",
     )
 
+    # Artist detail card
+    st.subheader("Artist Detail")
+    artist_options = music_df.groupby("artist").size().sort_values(ascending=False).index.tolist()
+    default_idx = (
+        artist_options.index(selected_artist)
+        if selected_artist != "All" and selected_artist in artist_options
+        else 0
+    )
+    selected_detail: str | None = st.selectbox(
+        "Select an artist to explore",
+        options=artist_options,
+        index=default_idx,
+        key="geo_table_artist_detail",
+    )
+    if selected_detail:
+        with st.container(border=True):
+            _render_artist_detail(selected_detail, music_df)
+
+
+# ---------------------------------------------------------------------------
+# 2D map city-breakdown helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_city_stats(df: DataFrame) -> DataFrame:
+    """Aggregate per-city listening statistics from the merged DataFrame.
+
+    Groups rows by ``city`` + ``country`` and computes play counts, unique
+    artist count, top artist/track, most active hour, date range, lat/lng
+    centroid, and estimated listening time.
+
+    Args:
+        df: Merged listening-history DataFrame.  Must contain ``city``,
+            ``country``, ``lat``, ``lng``, ``artist``, ``track``,
+            ``date_text``, and ``album`` columns.
+
+    Returns:
+        DataFrame with one row per (city, country) pair and computed stat
+        columns.  Returns an empty DataFrame when input is empty or missing
+        required columns.
+    """
+    if df.empty:
+        return pd.DataFrame()
+
+    required = {"city", "lat", "lng", "artist", "track", "date_text"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    geo_df = df.dropna(subset=["lat", "lng", "city"]).copy()
+    if geo_df.empty:
+        return pd.DataFrame()
+
+    # Fill missing country so groupby doesn't silently drop those rows.
+    if "country" in geo_df.columns:
+        geo_df["country"] = geo_df["country"].fillna("")
+    else:
+        geo_df["country"] = ""
+
+    rows: list[dict] = []
+    for (city, country), group in geo_df.groupby(["city", "country"], sort=False):
+        plays = len(group)
+        unique_artists = group["artist"].nunique()
+
+        top_artist_series = group["artist"].value_counts()
+        top_artist = str(top_artist_series.index[0]) if not top_artist_series.empty else ""
+
+        top_track_series = group["track"].value_counts()
+        top_track = str(top_track_series.index[0]) if not top_track_series.empty else ""
+
+        top_album = ""
+        if "album" in group.columns:
+            top_album_series = group["album"].value_counts()
+            top_album = str(top_album_series.index[0]) if not top_album_series.empty else ""
+
+        most_active_hour = int(group["date_text"].dt.hour.value_counts().index[0])
+        first_play = group["date_text"].min()
+        last_play = group["date_text"].max()
+        lat = float(group["lat"].mean())
+        lng = float(group["lng"].mean())
+
+        rows.append(
+            {
+                "city": city,
+                "country": country,
+                "plays": plays,
+                "unique_artists": unique_artists,
+                "top_artist": top_artist,
+                "top_track": top_track,
+                "top_album": top_album,
+                "most_active_hour": most_active_hour,
+                "est_listening_hrs": round(plays * _AVG_TRACK_MINUTES / 60, 1),
+                "first_play": first_play,
+                "last_play": last_play,
+                "lat": lat,
+                "lng": lng,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("plays", ascending=False).reset_index(drop=True)
+
+
+def _render_atlas_city_detail(city: str, city_stats: DataFrame, full_df: DataFrame) -> None:
+    """Render a detail card for a selected city with top-10 artists.
+
+    Args:
+        city: Name of the selected city.
+        city_stats: Full city-stats table from ``_build_city_stats``.
+        full_df: Raw (pre-filter) listening history DataFrame.
+    """
+    row = city_stats[city_stats["city"] == city]
+    if row.empty:
+        return
+
+    r = row.iloc[0]
+    st.subheader(f"{city}, {r['country']}")
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Plays", f"{r['plays']:,}")
+    col2.metric("Est. Listening", f"{r['est_listening_hrs']} hrs")
+    col3.metric("Unique Artists", f"{r['unique_artists']:,}")
+    col4.metric("Most Active Hour", f"{int(r['most_active_hour']):02d}:00")
+
+    col5, col6, col7 = st.columns(3)
+    col5.metric("Top Artist", str(r["top_artist"]))
+    col6.metric("Top Track", str(r["top_track"]))
+    col7.metric("Top Album", str(r["top_album"]) if r["top_album"] else "—")
+
+    first = r["first_play"]
+    last = r["last_play"]
+    if hasattr(first, "strftime"):
+        st.caption(f"Date range: {first.strftime('%Y-%m-%d')} — {last.strftime('%Y-%m-%d')}")
+
+    city_df = full_df[full_df["city"] == city]
+    top10 = get_top_entities(city_df, entity="artist", limit=10)
+    if not top10.empty:
+        fig = px.bar(
+            top10,
+            x="Plays",
+            y="artist",
+            orientation="h",
+            title=f"Top 10 Artists in {city}",
+            labels={"artist": "Artist"},
+            color="Plays",
+            color_continuous_scale=[[0.0, ACCENT_INDIGO], [1.0, ACCENT_CYAN]],
+        )
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False,
+            coloraxis_showscale=False,
+        )
+        apply_dark_theme(fig)
+        st.plotly_chart(fig, width="stretch")
+
+
+def _render_artist_detail(artist: str, df: DataFrame) -> None:
+    """Render a detail card for a selected artist with top-10 tracks.
+
+    Args:
+        artist: Name of the selected artist.
+        df: Filtered listening history DataFrame.
+    """
+    artist_df = df[df["artist"] == artist]
+    if artist_df.empty:
+        return
+
+    st.subheader(artist)
+
+    plays = len(artist_df)
+    est_hrs = round(plays * _AVG_TRACK_MINUTES / 60, 1)
+    most_active_hour = int(artist_df["date_text"].dt.hour.value_counts().index[0])
+
+    top_track = str(artist_df["track"].value_counts().index[0])
+
+    top_album = "—"
+    if "album" in artist_df.columns:
+        non_null = artist_df["album"].dropna()
+        if not non_null.empty:
+            top_album = str(non_null.value_counts().index[0])
+
+    top_city = "—"
+    if "city" in artist_df.columns:
+        non_null = artist_df["city"].dropna()
+        if not non_null.empty:
+            top_city = str(non_null.value_counts().index[0])
+
+    first = artist_df["date_text"].min()
+    last = artist_df["date_text"].max()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Plays", f"{plays:,}")
+    col2.metric("Est. Listening", f"{est_hrs} hrs")
+    col3.metric("Most Active Hour", f"{most_active_hour:02d}:00")
+    col4.metric("Top City", top_city)
+
+    col5, col6 = st.columns(2)
+    col5.metric("Top Track", top_track)
+    col6.metric("Top Album", top_album)
+
+    if hasattr(first, "strftime"):
+        st.caption(f"Date range: {first.strftime('%Y-%m-%d')} — {last.strftime('%Y-%m-%d')}")
+
+    top10 = get_top_entities(artist_df, entity="track", limit=10)
+    if not top10.empty:
+        fig = px.bar(
+            top10,
+            x="Plays",
+            y="track",
+            orientation="h",
+            title=f"Top 10 Tracks — {artist}",
+            labels={"track": "Track"},
+            color="Plays",
+            color_continuous_scale=[[0.0, ACCENT_INDIGO], [1.0, ACCENT_CYAN]],
+        )
+        fig.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            showlegend=False,
+            coloraxis_showscale=False,
+        )
+        apply_dark_theme(fig)
+        st.plotly_chart(fig, width="stretch")
+
+
+def _render_city_breakdown(music_df: DataFrame) -> None:
+    """Render the city breakdown table and detail card within the 2D Map view.
+
+    Args:
+        music_df: Artist/date-filtered listening history DataFrame.
+    """
+    city_stats = _build_city_stats(music_df)
+    if city_stats.empty:
+        st.info("No per-city data could be computed from the current dataset.")
+        return
+
+    display_cols = [
+        "city",
+        "country",
+        "plays",
+        "est_listening_hrs",
+        "unique_artists",
+        "top_artist",
+        "top_track",
+    ]
+    available_cols = [c for c in display_cols if c in city_stats.columns]
+    col_config: dict[str, object] = {
+        "city": st.column_config.TextColumn("City"),
+        "country": st.column_config.TextColumn("Country"),
+        "plays": st.column_config.NumberColumn("Plays", format="%d"),
+        "est_listening_hrs": st.column_config.NumberColumn("Est. Hours", format="%.1f"),
+        "unique_artists": st.column_config.NumberColumn("Unique Artists", format="%d"),
+        "top_artist": st.column_config.TextColumn("Top Artist"),
+        "top_track": st.column_config.TextColumn("Top Track"),
+    }
+    st.dataframe(
+        city_stats[available_cols],
+        hide_index=True,
+        column_config=col_config,
+        width="stretch",
+    )
+
+    city_names = city_stats["city"].tolist()
+    selected_city: str | None = st.selectbox(
+        "Select a city to explore",
+        options=city_names,
+        index=0,
+        key="geo_2d_city_detail",
+    )
+    if selected_city:
+        with st.container(border=True):
+            _render_atlas_city_detail(selected_city, city_stats, music_df)
+
 
 # ---------------------------------------------------------------------------
 # Main render entry point
@@ -770,7 +1051,8 @@ def render_geo_explorer() -> None:
     Four view modes are available via a segmented control:
 
     * **3D Globe** — Pydeck globe with country/state overlays and flythrough recording.
-    * **2D Map** — Plotly scatter_map dots sized by play count.
+    * **2D Map** — Plotly scatter_map dots sized by play count; "By City" radio below
+      the map switches to a city breakdown table and detail card.
     * **US States** — Plotly choropleth coloured by scrobble density per state.
     * **Table** — Paginated artist-city summary table with sort options.
 
@@ -855,6 +1137,14 @@ def render_geo_explorer() -> None:
                 )
                 date_range = tuple(raw_dr) if raw_dr else ()
 
+            if view == _VIEW_2D and has_music:
+                st.radio(
+                    "Map breakdown",
+                    ["By Artist", "By City"],
+                    horizontal=True,
+                    key="geo_breakdown",
+                )
+
     # ── Settings popover (3D only) ────────────────────────────────────────────
     with set_col:
         with st.popover("⚙ Settings"):
@@ -882,7 +1172,8 @@ def render_geo_explorer() -> None:
                     "**2D Map gestures**\n"
                     "- **Pan**: click drag\n"
                     "- **Zoom**: scroll wheel or pinch\n"
-                    "- **Hover**: city details"
+                    "- **Hover**: city details\n"
+                    "- Use **By City** breakdown for city stats and top-10 artists"
                 )
             elif view == _VIEW_US:
                 st.markdown(

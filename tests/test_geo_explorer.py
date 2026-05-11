@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 from pages.geo_explorer import (
+    _build_city_stats,
     _build_flythrough_filename,
     _spectrum_color,
     build_globe_data,
@@ -202,6 +203,7 @@ class TestRenderGeoExplorer(unittest.TestCase):
     @patch("streamlit.plotly_chart")
     @patch("streamlit.metric")
     @patch("streamlit.caption")
+    @patch("streamlit.radio")
     @patch("streamlit.selectbox")
     @patch("streamlit.columns")
     @patch("streamlit.segmented_control")
@@ -212,6 +214,7 @@ class TestRenderGeoExplorer(unittest.TestCase):
         mock_seg: MagicMock,
         mock_cols: MagicMock,
         mock_sel: MagicMock,
+        mock_radio: MagicMock,
         mock_cap: MagicMock,
         mock_metric: MagicMock,
         mock_plotly: MagicMock,
@@ -219,6 +222,7 @@ class TestRenderGeoExplorer(unittest.TestCase):
     ) -> None:
         mock_seg.return_value = "🗺 2D Map"
         mock_sel.return_value = "All"
+        mock_radio.return_value = "By Artist"
         mock_cols.side_effect = self._cols_side_effect
 
         with patch("streamlit.popover", return_value=self._make_pop_mock()):
@@ -230,6 +234,8 @@ class TestRenderGeoExplorer(unittest.TestCase):
         mock_plotly.assert_called()
 
     @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.container")
+    @patch("streamlit.subheader")
     @patch("streamlit.dataframe")
     @patch("streamlit.caption")
     @patch("streamlit.radio")
@@ -248,13 +254,17 @@ class TestRenderGeoExplorer(unittest.TestCase):
         mock_radio: MagicMock,
         mock_cap: MagicMock,
         mock_df: MagicMock,
+        mock_sub: MagicMock,
+        mock_container: MagicMock,
         mock_share: MagicMock,
     ) -> None:
         mock_seg.return_value = "📋 Table"
         mock_sel.return_value = "All"
-        mock_radio.return_value = "Plays"
+        # Radios: "Show" (By Artist/By City), "Sort by"
+        mock_radio.side_effect = ["By Artist", "Plays"]
         mock_num.return_value = 1
         mock_cols.side_effect = self._cols_side_effect
+        mock_container.return_value = self._make_col_mock()
 
         with patch("streamlit.popover", return_value=self._make_pop_mock()):
             with patch("streamlit.pills", return_value=["Scrobbles"]):
@@ -297,6 +307,172 @@ class TestRenderGeoExplorer(unittest.TestCase):
             with patch("streamlit.pills", return_value=["Scrobbles"]):
                 with patch("streamlit.date_input", return_value=()):
                     self._run({"df": _make_us_df(), "swarm_df": None})
+
+        mock_plotly.assert_called()
+
+
+def _make_atlas_df() -> pd.DataFrame:
+    """Minimal listening-history DataFrame with geo columns for Atlas tests."""
+    return pd.DataFrame(
+        {
+            "artist": ["Artist A", "Artist B", "Artist A", "Artist C", "Artist A"],
+            "album": ["Album 1", "Album 2", "Album 1", "Album 3", "Album 1"],
+            "track": ["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"],
+            "timestamp": [1610000000, 1610000100, 1610000200, 1610003600, 1610007200],
+            "date_text": pd.to_datetime(
+                [
+                    "2021-01-07 10:00",
+                    "2021-01-07 10:01",
+                    "2021-01-07 11:02",
+                    "2021-01-07 12:00",
+                    "2021-01-07 13:00",
+                ]
+            ),
+            "lat": [64.13, 51.51, 64.13, 48.85, 64.13],
+            "lng": [-21.82, -0.13, -21.82, 2.35, -21.82],
+            "city": ["Reykjavik", "London", "Reykjavik", "Paris", "Reykjavik"],
+            "country": ["Iceland", "UK", "Iceland", "France", "Iceland"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# _build_city_stats
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCityStats(unittest.TestCase):
+    def test_row_per_city(self) -> None:
+        result = _build_city_stats(_make_atlas_df())
+        self.assertEqual(len(result), 3)
+
+    def test_required_columns_present(self) -> None:
+        result = _build_city_stats(_make_atlas_df())
+        for col in (
+            "city",
+            "country",
+            "plays",
+            "unique_artists",
+            "top_artist",
+            "top_track",
+            "most_active_hour",
+            "first_play",
+            "last_play",
+        ):
+            self.assertIn(col, result.columns, f"Missing column: {col}")
+
+    def test_play_counts_correct(self) -> None:
+        result = _build_city_stats(_make_atlas_df()).set_index("city")
+        self.assertEqual(result.loc["Reykjavik", "plays"], 3)
+        self.assertEqual(result.loc["London", "plays"], 1)
+        self.assertEqual(result.loc["Paris", "plays"], 1)
+
+    def test_unique_artists_correct(self) -> None:
+        result = _build_city_stats(_make_atlas_df()).set_index("city")
+        self.assertEqual(result.loc["Reykjavik", "unique_artists"], 1)
+
+    def test_top_artist_correct(self) -> None:
+        result = _build_city_stats(_make_atlas_df()).set_index("city")
+        self.assertEqual(result.loc["Reykjavik", "top_artist"], "Artist A")
+
+    def test_most_active_hour_is_valid_int(self) -> None:
+        result = _build_city_stats(_make_atlas_df()).set_index("city")
+        hour = int(result.loc["Reykjavik", "most_active_hour"])
+        self.assertGreaterEqual(hour, 0)
+        self.assertLessEqual(hour, 23)
+
+    def test_lat_lng_preserved(self) -> None:
+        result = _build_city_stats(_make_atlas_df()).set_index("city")
+        self.assertAlmostEqual(float(result.loc["Reykjavik", "lat"]), 64.13, places=1)
+
+    def test_null_country_rows_included(self) -> None:
+        df = _make_atlas_df().copy()
+        df["country"] = None  # all country values missing
+        result = _build_city_stats(df)
+        # All three cities should still appear despite missing country
+        self.assertEqual(len(result), 3)
+
+    def test_missing_country_column_still_works(self) -> None:
+        df = _make_atlas_df().drop(columns=["country"])
+        result = _build_city_stats(df)
+        self.assertEqual(len(result), 3)
+
+    def test_empty_dataframe_returns_empty(self) -> None:
+        self.assertTrue(_build_city_stats(pd.DataFrame()).empty)
+
+    def test_missing_geo_columns_returns_empty(self) -> None:
+        df = pd.DataFrame(
+            {"artist": ["A"], "track": ["T"], "date_text": pd.to_datetime(["2021-01-01"])}
+        )
+        self.assertTrue(_build_city_stats(df).empty)
+
+
+# ---------------------------------------------------------------------------
+# 2D map city breakdown — smoke test
+# ---------------------------------------------------------------------------
+
+
+class TestCityBreakdown(unittest.TestCase):
+    def _make_col_mock(self) -> MagicMock:
+        col = MagicMock()
+        col.__enter__ = MagicMock(return_value=col)
+        col.__exit__ = MagicMock(return_value=False)
+        return col
+
+    def _make_pop_mock(self) -> MagicMock:
+        return MagicMock(
+            __enter__=MagicMock(return_value=MagicMock()),
+            __exit__=MagicMock(return_value=False),
+        )
+
+    def _cols_side_effect(self, *args, **kwargs):
+        n = args[0] if args else 1
+        count = len(n) if isinstance(n, (list, tuple)) else int(n)
+        return [self._make_col_mock() for _ in range(count)]
+
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.container")
+    @patch("streamlit.plotly_chart")
+    @patch("streamlit.dataframe")
+    @patch("streamlit.caption")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    def test_by_city_breakdown_renders(
+        self,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_cap: MagicMock,
+        mock_df: MagicMock,
+        mock_plotly: MagicMock,
+        mock_container: MagicMock,
+        mock_share: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        mock_radio.return_value = "By City"
+        # First selectbox = artist filter ("All"); second = city detail
+        call_count: list[int] = [0]
+
+        def _sel_side_effect(label: str, *a, **kw) -> str:
+            call_count[0] += 1
+            return "All" if call_count[0] == 1 else "Reykjavik"
+
+        mock_sel.side_effect = _sel_side_effect
+        mock_cols.side_effect = self._cols_side_effect
+        mock_container.return_value = self._make_col_mock()
+
+        with patch("streamlit.popover", return_value=self._make_pop_mock()):
+            with patch("streamlit.pills", return_value=["Scrobbles"]):
+                with patch("streamlit.date_input", return_value=()):
+                    with patch(
+                        "streamlit.session_state", {"df": _make_atlas_df(), "swarm_df": None}
+                    ):
+                        render_geo_explorer()
 
         mock_plotly.assert_called()
 
