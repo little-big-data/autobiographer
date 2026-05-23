@@ -16,11 +16,21 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+import analysis_utils
 from analysis_utils import (
+    DEEP_ARCS_CACHE,
+    DEEP_CITY_SOUNDTRACKS_CACHE,
+    DEEP_LIFE_EVENTS_CACHE,
+    DEEP_PERSONALITY_CACHE,
+    DEEP_SEASONAL_CACHE,
+    DEEP_SESSIONS_CACHE,
+    DEEP_TASTE_DRIFT_CACHE,
+    DEEP_VENUE_PATTERNS_CACHE,
     DETECTED_TRIPS_CACHE,
     DINING_CACHE,
     TRANSIT_DAYS_CACHE,
     detect_trips_from_swarm,
+    get_deep_analysis_status,
     get_dining_soundtrack_data,
     get_transit_days,
     load_assumptions,
@@ -502,6 +512,264 @@ def _render_cache_tab() -> None:
             st.info("Nothing to clear — cache directory does not exist.")
 
 
+def _deep_analysis_not_computed_banner(analysis_name: str) -> None:
+    """Show an info banner telling the user to compute the deep analysis.
+
+    Args:
+        analysis_name: Human-readable name of the analysis that is not yet computed.
+    """
+    st.info(
+        f"**{analysis_name}** hasn't been calculated yet.  \n"
+        "Go to **Data Sources → Overview** and click "
+        "**Calculate All Deep Analyses** to get started.",
+        icon="ℹ️",
+    )
+
+
+_DEEP_ANALYSIS_LABELS: dict[str, str] = {
+    "sessions": "Sessions",
+    "personality": "Personality",
+    "arcs": "Artist Arcs",
+    "seasonal": "Seasonal",
+    "taste_drift": "Taste Drift",
+    "city_soundtracks": "City Soundtracks",
+    "venue_patterns": "Venue Patterns",
+    "life_events": "Life Events",
+}
+
+_DEEP_CACHE_PATHS: dict[str, str] = {
+    "sessions": DEEP_SESSIONS_CACHE,
+    "personality": DEEP_PERSONALITY_CACHE,
+    "arcs": DEEP_ARCS_CACHE,
+    "seasonal": DEEP_SEASONAL_CACHE,
+    "taste_drift": DEEP_TASTE_DRIFT_CACHE,
+    "city_soundtracks": DEEP_CITY_SOUNDTRACKS_CACHE,
+    "venue_patterns": DEEP_VENUE_PATTERNS_CACHE,
+    "life_events": DEEP_LIFE_EVENTS_CACHE,
+}
+
+
+def _render_deep_analysis_compute(broker: Any) -> None:
+    """Render the Deep Analysis compute section in the Data Sources overview.
+
+    Shows a status grid for all 8 deep analysis cache files, a button to
+    calculate all analyses, and a button to clear the cache.
+
+    Args:
+        broker: DataBroker instance (or any object with ``get_merged_frame()``).
+    """
+    st.subheader("Deep Analysis")
+    st.write(
+        "Run once to pre-compute all deep analyses. "
+        "Results are cached; re-run anytime data changes."
+    )
+
+    status = get_deep_analysis_status()
+
+    if broker is None:
+        df = None
+    elif isinstance(broker, pd.DataFrame):
+        df = broker
+    else:
+        df = broker.get_merged_frame()
+    has_data = df is not None and not (hasattr(df, "empty") and df.empty)
+
+    # Status grid — one column per analysis
+    grid_cols = st.columns(len(status))
+    for col, (name, present) in zip(grid_cols, status.items()):
+        label = _DEEP_ANALYSIS_LABELS.get(name, name)
+        icon = "✅" if present else "◻️"
+        col.caption(f"{icon} {label}")
+
+    st.divider()
+
+    if not has_data:
+        st.info("Load your data sources first before calculating deep analyses.")
+        return
+
+    if st.button("Calculate All Deep Analyses", type="primary"):
+        with st.status("Calculating deep analyses…", expanded=True):
+            steps = [
+                ("sessions", "Sessions"),
+                ("personality", "Personality"),
+                ("arcs", "Artist Arcs"),
+                ("seasonal", "Seasonal"),
+                ("taste_drift", "Taste Drift"),
+                ("city_soundtracks", "City Soundtracks"),
+                ("venue_patterns", "Venue Patterns"),
+                ("life_events", "Life Events"),
+            ]
+            for _key, label in steps:
+                try:
+                    st.write(f"⚙️ {label}…")
+                    if _key == "sessions":
+                        df_with_sessions = analysis_utils.detect_listening_sessions(df)
+                        session_stats = analysis_utils.get_session_stats(df_with_sessions)
+                        analysis_utils.save_deep_sessions_cache(
+                            {"session_stats": session_stats.to_dict(orient="records")}
+                        )
+                    elif _key == "personality":
+                        gini = analysis_utils.get_gini_coefficient(df)
+                        monthly_new = analysis_utils.get_monthly_new_artist_rate(df)
+                        loyalty_score = analysis_utils.get_loyalty_score(df)
+                        comfort = analysis_utils.get_comfort_ratio(df)
+                        album_depth = analysis_utils.get_album_sequence_depth(df)
+                        analysis_utils.save_deep_personality_cache(
+                            {
+                                "gini": gini,
+                                "loyalty_score": loyalty_score,
+                                "monthly_new_artists": monthly_new.to_dict(orient="records"),
+                                "comfort_ratio": comfort.to_dict(orient="records"),
+                                "album_depth": album_depth.to_dict(orient="records"),
+                            }
+                        )
+                    elif _key == "arcs":
+                        arc_df = analysis_utils.get_all_artist_arcs(df)
+                        analysis_utils.save_deep_arcs_cache(
+                            {"arcs": arc_df.to_dict(orient="records")}
+                        )
+                        st.write(f"✅ Artist arcs done ({len(arc_df):,} artists classified)")
+                    elif _key == "seasonal":
+                        seasonal_df = analysis_utils.get_seasonal_artist_affinity(df)
+                        morning_night = analysis_utils.get_morning_vs_night_artists(df)
+                        dow = analysis_utils.get_day_of_week_personality(df)
+                        # Load assumptions from session state (same pattern as elsewhere)
+                        try:
+                            assumptions_config = st.session_state.get("_loaded_config", {})
+                            assumptions_path = (
+                                assumptions_config.get("assumptions", {}).get("path", "")
+                                if isinstance(assumptions_config, dict)
+                                else (assumptions_config[2] if assumptions_config else "")
+                            )
+                        except Exception:  # noqa: BLE001
+                            assumptions_path = ""
+                        assumptions = load_assumptions(assumptions_path)
+                        holiday_df = analysis_utils.get_holiday_musical_identity(df, assumptions)
+                        analysis_utils.save_deep_seasonal_cache(
+                            {
+                                "seasonal_affinity": seasonal_df.to_dict(orient="records"),
+                                "morning_artists": morning_night["morning"].to_dict(
+                                    orient="records"
+                                ),
+                                "night_artists": morning_night["night"].to_dict(orient="records"),
+                                "day_of_week": dow.to_dict(orient="records"),
+                                "holiday_identity": holiday_df.to_dict(orient="records"),
+                            }
+                        )
+                    elif _key == "taste_drift":
+                        try:
+                            taste_config = st.session_state.get("_loaded_config", {})
+                            taste_assumptions_path = (
+                                taste_config.get("assumptions", {}).get("path", "")
+                                if isinstance(taste_config, dict)
+                                else (taste_config[2] if taste_config else "")
+                            )
+                        except Exception:  # noqa: BLE001
+                            taste_assumptions_path = ""
+                        taste_assumptions = load_assumptions(taste_assumptions_path)
+                        era_tops = analysis_utils.get_era_top_artists(df, taste_assumptions)
+                        jaccard_df = analysis_utils.get_era_jaccard_similarity(era_tops)
+                        defining = analysis_utils.get_era_defining_artists(df, taste_assumptions)
+                        timeline = analysis_utils.get_taste_evolution_timeline(
+                            df, taste_assumptions
+                        )
+                        analysis_utils.save_deep_taste_drift_cache(
+                            {
+                                "era_tops": {
+                                    k: v.to_dict(orient="records") for k, v in era_tops.items()
+                                },
+                                "jaccard": jaccard_df.to_dict(),
+                                "defining_artists": defining,
+                                "timeline": timeline.to_dict(orient="records"),
+                            }
+                        )
+                    elif _key == "city_soundtracks":
+                        try:
+                            cs_config = st.session_state.get("_loaded_config", {})
+                            cs_assumptions_path = (
+                                cs_config.get("assumptions", {}).get("path", "")
+                                if isinstance(cs_config, dict)
+                                else (cs_config[2] if cs_config else "")
+                            )
+                        except Exception:  # noqa: BLE001
+                            cs_assumptions_path = ""
+                        cs_assumptions = load_assumptions(cs_assumptions_path)
+                        swarm_df = st.session_state.get("swarm_df")
+                        city_soundtracks = analysis_utils.get_all_city_soundtracks(
+                            df, cs_assumptions, swarm_df
+                        )
+                        analysis_utils.save_deep_city_soundtracks_cache(
+                            {
+                                "soundtracks": [
+                                    {
+                                        "city": s["city"],
+                                        "top_artists": s["top_artists"].to_dict(orient="records"),
+                                        "top_tracks": s["top_tracks"].to_dict(orient="records"),
+                                        "play_count": s["play_count"],
+                                    }
+                                    for s in city_soundtracks
+                                ]
+                            }
+                        )
+                    elif _key == "venue_patterns":
+                        swarm_df = st.session_state.get("swarm_df")
+                        if swarm_df is not None and not swarm_df.empty:
+                            loyalty = analysis_utils.get_venue_loyalty_scores(swarm_df)
+                            routine = analysis_utils.get_routine_venues(swarm_df)
+                            exploration = analysis_utils.get_venue_exploration_rate(swarm_df)
+                            music_cafe = analysis_utils.get_music_around_venue_type(
+                                swarm_df, df, ["cafe", "coffee"]
+                            )
+                            analysis_utils.save_deep_venue_patterns_cache(
+                                {
+                                    "loyalty": loyalty.to_dict(orient="records"),
+                                    "routine": routine.to_dict(orient="records"),
+                                    "exploration": exploration.to_dict(orient="records"),
+                                    "music_around_cafes": music_cafe["top_artists"].to_dict(
+                                        orient="records"
+                                    ),
+                                }
+                            )
+                        else:
+                            analysis_utils.save_deep_venue_patterns_cache({"no_swarm_data": True})
+                    elif _key == "life_events":
+                        changepoints = analysis_utils.detect_listening_changepoints(df)
+                        taste_shifts = analysis_utils.detect_taste_shift_points(df)
+                        try:
+                            le_config = st.session_state.get("_loaded_config", {})
+                            le_assumptions_path = (
+                                le_config.get("assumptions", {}).get("path", "")
+                                if isinstance(le_config, dict)
+                                else (le_config[2] if le_config else "")
+                            )
+                        except Exception:  # noqa: BLE001
+                            le_assumptions_path = ""
+                        le_assumptions = load_assumptions(le_assumptions_path)
+                        events = analysis_utils.correlate_events_with_assumptions(
+                            changepoints, taste_shifts, le_assumptions
+                        )
+                        analysis_utils.save_deep_life_events_cache(
+                            {
+                                "changepoints": [str(cp) for cp in changepoints],
+                                "taste_shifts": [
+                                    {**s, "date": str(s["date"])} for s in taste_shifts
+                                ],
+                                "events": [{**e, "date": str(e["date"])} for e in events],
+                            }
+                        )
+                    st.write(f"✅ {label} done")
+                except Exception as e:  # noqa: BLE001
+                    st.write(f"❌ {label} failed: {e}")
+            st.write("✅ All done.")
+        st.rerun()
+
+    if st.button("Clear Deep Analysis Cache"):
+        for path in _DEEP_CACHE_PATHS.values():
+            if os.path.exists(path):
+                os.remove(path)
+        st.rerun()
+
+
 def render_data_sources() -> None:
     """Render the Data Sources overview page (summary metrics + Cache tab)."""
     load_builtin_plugins()
@@ -551,3 +819,5 @@ def render_data_sources() -> None:
 
     with cache_tab:
         _render_cache_tab()
+        st.divider()
+        _render_deep_analysis_compute(st.session_state.get("df"))
