@@ -71,9 +71,9 @@ def render_taste_drift() -> None:
         filtered = year_df[year_df["artist"].isin(top_artists)]
         if not filtered.empty:
             pivot = filtered.pivot_table(
-                index="month", columns="artist", values="rank", aggfunc="min"
-            )
-            st.line_chart(pivot, width="stretch")
+                index="month", columns="artist", values="plays", aggfunc="sum"
+            ).fillna(0)
+            st.area_chart(pivot, width="stretch")
         else:
             st.info("No play data for the selected year.")
 
