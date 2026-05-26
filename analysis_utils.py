@@ -243,6 +243,185 @@ def load_swarm_data(swarm_dir: str) -> pd.DataFrame:
     return df
 
 
+def infer_residency_periods(
+    swarm_df: pd.DataFrame,
+    radius_km: float = 48.0,
+    min_months: int = 3,
+) -> list[dict[str, str]]:
+    """Infer home-base residency periods from Swarm check-in coordinates.
+
+    Applies a five-step algorithm:
+    1. Greedy haversine radius merge to cluster coordinates into metro areas.
+    2. Monthly plurality vote to assign each calendar month to a cluster.
+    3. Forward-fill sparse months (no back-fill for leading gaps).
+    4. Stability filter: only keep runs of >= min_months consecutive months.
+    5. Collapse qualifying runs into period dicts with city, start, end.
+
+    Args:
+        swarm_df: DataFrame with columns timestamp (int unix seconds),
+            lat (float), lng (float), city (str).
+        radius_km: Merge radius in kilometres for greedy clustering.
+        min_months: Minimum consecutive months required to declare a residency.
+
+    Returns:
+        List of dicts with keys ``city``, ``start``, ``end`` (ISO date strings),
+        sorted by start date.  Returns ``[]`` on edge-case inputs.
+    """
+    # --- Guard: required columns ---
+    if swarm_df is None or swarm_df.empty:
+        return []
+    if "lat" not in swarm_df.columns or "lng" not in swarm_df.columns:
+        return []
+
+    # --- Drop rows with null lat/lng ---
+    df = swarm_df.dropna(subset=["lat", "lng"]).copy()
+    if df.empty:
+        return []
+
+    # Ensure city column exists; fill missing/None with empty string
+    if "city" not in df.columns:
+        df["city"] = ""
+    df["city"] = df["city"].fillna("").astype(str)
+
+    # --- Step 1: Greedy haversine radius merge ---
+    # Collect unique (lat, lng) pairs and their city labels
+    unique_coords = df[["lat", "lng", "city"]].copy()
+    unique_coords["lat"] = unique_coords["lat"].astype(float)
+    unique_coords["lng"] = unique_coords["lng"].astype(float)
+
+    # cluster_centroids: list of [mean_lat, mean_lng, total_count]
+    # cluster_city_counts: list of dict {city: count}
+    cluster_centroids: list[list[float]] = []
+    cluster_city_counts: list[dict[str, int]] = []
+    # Maps row index to cluster index
+    coord_cluster: list[int] = []
+
+    def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+        """Return haversine distance in km between two coordinate pairs."""
+        r = 6371.0
+        dlat = math.radians(lat2 - lat1)
+        dlng = math.radians(lng2 - lng1)
+        a = (
+            math.sin(dlat / 2) ** 2
+            + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlng / 2) ** 2
+        )
+        return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    for _, row in unique_coords.iterrows():
+        lat, lng, city = float(row["lat"]), float(row["lng"]), str(row["city"])
+        best_idx = -1
+        best_dist = float("inf")
+        for ci, centroid in enumerate(cluster_centroids):
+            d = _haversine(lat, lng, centroid[0], centroid[1])
+            if d < best_dist:
+                best_dist = d
+                best_idx = ci
+
+        if best_idx >= 0 and best_dist <= radius_km:
+            # Assign to existing cluster and recompute centroid
+            count = cluster_centroids[best_idx][2]
+            cluster_centroids[best_idx][0] = (cluster_centroids[best_idx][0] * count + lat) / (
+                count + 1
+            )
+            cluster_centroids[best_idx][1] = (cluster_centroids[best_idx][1] * count + lng) / (
+                count + 1
+            )
+            cluster_centroids[best_idx][2] = count + 1
+            coord_cluster.append(best_idx)
+            if city:
+                cluster_city_counts[best_idx][city] = cluster_city_counts[best_idx].get(city, 0) + 1
+        else:
+            # Start a new cluster
+            new_idx = len(cluster_centroids)
+            cluster_centroids.append([lat, lng, 1.0])
+            city_counts: dict[str, int] = {}
+            if city:
+                city_counts[city] = 1
+            cluster_city_counts.append(city_counts)
+            coord_cluster.append(new_idx)
+
+    # Label each cluster by most-frequent city name
+    cluster_labels: list[str] = []
+    for city_counts in cluster_city_counts:
+        if city_counts:
+            cluster_labels.append(max(city_counts, key=lambda k: city_counts[k]))
+        else:
+            cluster_labels.append("Unknown")
+
+    # Assign cluster index to every row in df by matching (lat, lng)
+    # Build a lookup: (lat, lng) -> cluster index
+    coord_to_cluster: dict[tuple[float, float], int] = {}
+    for i, row in enumerate(unique_coords.itertuples(index=False)):
+        coord_to_cluster[(float(row.lat), float(row.lng))] = coord_cluster[i]
+
+    df["_cluster"] = df.apply(
+        lambda r: coord_to_cluster.get((float(r["lat"]), float(r["lng"])), 0), axis=1
+    )
+    df["_cluster_label"] = df["_cluster"].apply(lambda c: cluster_labels[c])
+
+    # --- Step 2: Monthly plurality vote ---
+    df["_month"] = pd.to_datetime(df["timestamp"], unit="s").dt.to_period("M")
+
+    month_clusters = df.groupby(["_month", "_cluster"]).size().reset_index(name="count")
+    # For each month, pick the cluster with the highest count (ties: lowest cluster index)
+    idx = month_clusters.groupby("_month")["count"].idxmax()
+    month_winner = month_clusters.loc[idx].set_index("_month")["_cluster"]
+    # Convert cluster index to label
+    month_label: pd.Series = month_winner.map(lambda c: cluster_labels[c])
+
+    # --- Step 3: Forward-fill sparse months ---
+    all_months = pd.period_range(month_label.index.min(), month_label.index.max(), freq="M")
+    month_label = month_label.reindex(all_months)
+    month_label = month_label.ffill()
+    # Drop leading NaN (months before first check-in — no back-fill)
+    month_label = month_label.dropna()
+
+    if month_label.empty:
+        return []
+
+    # --- Step 4: Stability filter ---
+    # Identify runs and mark months in runs of length >= min_months
+    labels_list = month_label.tolist()
+    months_list = month_label.index.tolist()
+    n = len(labels_list)
+
+    # Compute run lengths
+    qualifying: list[bool] = [False] * n
+    i = 0
+    while i < n:
+        j = i
+        while j < n and labels_list[j] == labels_list[i]:
+            j += 1
+        run_len = j - i
+        if run_len >= min_months:
+            for k in range(i, j):
+                qualifying[k] = True
+        i = j
+
+    # --- Step 5: Collapse qualifying months into period dicts ---
+    # Build a list of (city_label, month_period) for qualifying months only,
+    # then merge consecutive entries with the same label — even if there were
+    # non-qualifying months between two same-label qualifying runs (blip eaten).
+    qualifying_entries: list[tuple[str, Any]] = [
+        (labels_list[k], months_list[k]) for k in range(n) if qualifying[k]
+    ]
+
+    periods: list[dict[str, str]] = []
+    ei = 0
+    while ei < len(qualifying_entries):
+        city_label, run_start_period = qualifying_entries[ei]
+        run_end_period = run_start_period
+        ei += 1
+        while ei < len(qualifying_entries) and qualifying_entries[ei][0] == city_label:
+            run_end_period = qualifying_entries[ei][1]
+            ei += 1
+        start_str = run_start_period.to_timestamp("D", how="start").strftime("%Y-%m-%d")
+        end_str = run_end_period.to_timestamp("D", how="end").strftime("%Y-%m-%d")
+        periods.append({"city": city_label, "start": start_str, "end": end_str})
+
+    return sorted(periods, key=lambda d: d["start"])
+
+
 def get_assumption_location(ts: int, assumptions: dict[str, Any]) -> Optional[dict[str, Any]]:
     """
     Get location and offset based on runtime assumptions (Issue #39).

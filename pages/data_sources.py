@@ -8,6 +8,7 @@ Cache Management.  Each plugin has its own dedicated page rendered by
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from datetime import datetime, timezone
@@ -414,6 +415,71 @@ def _render_swarm_analysis() -> None:
             f"Detected trips cache: `{DETECTED_TRIPS_CACHE}` · "
             f"Transit: `{TRANSIT_DAYS_CACHE}` · Dining: `{DINING_CACHE}`"
         )
+
+    # ── Infer Residency Periods ───────────────────────────────────────────────
+    st.divider()
+    st.subheader(":material/home_pin: Infer Residency Periods")
+    st.caption(
+        "Automatically detect home cities from your check-in coordinates. "
+        "Results can be saved to your assumptions file."
+    )
+
+    if swarm_df is None or (isinstance(swarm_df, pd.DataFrame) and swarm_df.empty):
+        st.info("Load Swarm data to enable residency inference.")
+        return
+
+    if st.button(
+        ":material/home_pin: Infer Residency from Check-ins",
+        key="infer_residency_btn",
+    ):
+        with st.spinner("Inferring residency periods…"):
+            result = analysis_utils.infer_residency_periods(swarm_df)
+        if result:
+            st.session_state["_inferred_residency"] = result
+        else:
+            st.warning(
+                "No residency periods could be inferred — ensure your Swarm data "
+                "has sufficient check-ins with lat/lng coordinates."
+            )
+            # Make sure stale key is not left behind
+            st.session_state.pop("_inferred_residency", None)
+
+    inferred = st.session_state.get("_inferred_residency")
+    if inferred:
+        st.dataframe(pd.DataFrame(inferred), width="stretch")
+
+        # ── Save confirmation and button ──────────────────────────────────────
+        st.warning(
+            "This will replace the existing residency list in your assumptions file. "
+            "The operation cannot be undone."
+        )
+        if st.button(
+            ":material/save: Save Residency to Assumptions",
+            key="save_residency_btn",
+        ):
+            save_loaded_config = st.session_state.get("_loaded_config")
+            save_assumptions_path: str | None = (
+                save_loaded_config[2] if save_loaded_config else None
+            )
+
+            if not save_assumptions_path or not os.path.exists(save_assumptions_path):
+                st.error(
+                    "No assumptions file configured or file not found. "
+                    "Set the assumptions path in plugin settings."
+                )
+            else:
+                try:
+                    current_assumptions = load_assumptions(save_assumptions_path)
+                    current_assumptions["residency"] = st.session_state["_inferred_residency"]
+                    with open(save_assumptions_path, "w", encoding="utf-8") as fh:
+                        json.dump(current_assumptions, fh, indent=2)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Failed to save: {exc}")
+                else:
+                    invalidate_data_cache()
+                    del st.session_state["_inferred_residency"]
+                    st.success("Residency periods saved to assumptions file.")
+                    st.rerun()
 
 
 def render_plugin_page(plugin_id: str) -> None:
