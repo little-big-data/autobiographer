@@ -83,11 +83,15 @@ def render_taste_drift() -> None:
                         name=artist,
                         stackgroup="one",
                         mode="none",
+                        hovertemplate=(
+                            "<b>%{fullData.name}</b><br>%{x}<br>%{y} plays<extra></extra>"
+                        ),
                     )
                 )
             fig.update_layout(
                 xaxis_title=None,
                 yaxis_title="Plays",
+                hovermode="x",
                 legend=dict(orientation="h", yanchor="top", y=-0.15),
                 margin=dict(l=0, r=0, t=10, b=0),
             )
