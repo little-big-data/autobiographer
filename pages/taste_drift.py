@@ -7,6 +7,7 @@ If the cache is absent, a banner guides the user to compute it first.
 from __future__ import annotations
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from analysis_utils import load_deep_taste_drift_cache
@@ -73,7 +74,24 @@ def render_taste_drift() -> None:
             pivot = filtered.pivot_table(
                 index="month", columns="artist", values="plays", aggfunc="sum"
             ).fillna(0)
-            st.area_chart(pivot, width="stretch")
+            fig = go.Figure()
+            for artist in pivot.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=pivot.index,
+                        y=pivot[artist],
+                        name=artist,
+                        stackgroup="one",
+                        mode="none",
+                    )
+                )
+            fig.update_layout(
+                xaxis_title=None,
+                yaxis_title="Plays",
+                legend=dict(orientation="h", yanchor="top", y=-0.15),
+                margin=dict(l=0, r=0, t=10, b=0),
+            )
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("No play data for the selected year.")
 
