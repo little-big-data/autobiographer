@@ -49,6 +49,17 @@ class TestRenderDiscoveryZones(unittest.TestCase):
 
     def _patch_st(self) -> dict:
         """Return a dict of patches for Streamlit surface area."""
+
+        def _make_cm() -> MagicMock:
+            m = MagicMock()
+            m.__enter__ = MagicMock(return_value=m)
+            m.__exit__ = MagicMock(return_value=False)
+            return m
+
+        # selectbox is called 3 times: rate-grouping, city filter, year filter
+        selectbox_values = ["Monthly", "All cities", "All years"]
+        selectbox_iter = iter(selectbox_values)
+
         return {
             "streamlit.info": patch("streamlit.info"),
             "streamlit.warning": patch("streamlit.warning"),
@@ -60,9 +71,14 @@ class TestRenderDiscoveryZones(unittest.TestCase):
             "streamlit.dataframe": patch("streamlit.dataframe"),
             "streamlit.columns": patch(
                 "streamlit.columns",
-                return_value=[MagicMock(), MagicMock()],
+                side_effect=lambda n: [
+                    _make_cm() for _ in range(len(n) if isinstance(n, list) else n)
+                ],
             ),
-            "streamlit.selectbox": patch("streamlit.selectbox", return_value="Monthly"),
+            "streamlit.selectbox": patch(
+                "streamlit.selectbox",
+                side_effect=lambda *a, **kw: next(selectbox_iter),
+            ),
             "streamlit.slider": patch("streamlit.slider", return_value=15),
         }
 
@@ -119,8 +135,12 @@ class TestRenderDiscoveryZones(unittest.TestCase):
         """Yearly grouping option does not raise and renders a chart."""
         df = _make_df(with_geo=False, n_artists=2)
         patches = self._patch_st()
-        # Override selectbox to return "Yearly"
-        patches["streamlit.selectbox"] = patch("streamlit.selectbox", return_value="Yearly")
+        # Override: rate grouping="Yearly", city="All cities", year="All years"
+        yearly_vals = iter(["Yearly", "All cities", "All years"])
+        patches["streamlit.selectbox"] = patch(
+            "streamlit.selectbox",
+            side_effect=lambda *a, **kw: next(yearly_vals),
+        )
         ctx_managers = {k: p.start() for k, p in patches.items()}
         try:
             with patch("streamlit.session_state", {"df": df}):

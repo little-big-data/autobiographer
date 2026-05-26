@@ -217,11 +217,15 @@ def render_discovery_zones() -> None:
             fp_with_plays["artist"].map(artist_total_plays).fillna(0).astype(int)
         )
 
-        # Use the earliest discovery year as representative for the city dot
+        # Group by city only (not lat/lng) to avoid GPS-drift fragmentation from
+        # Swarm check-ins producing slightly different coordinates each visit.
+        # Median lat/lng gives a stable representative point per city.
         city_stats = (
             fp_with_plays.dropna(subset=["lat", "lng"])
-            .groupby(["city", "lat", "lng"])
+            .groupby("city")
             .agg(
+                lat=("lat", "median"),
+                lng=("lng", "median"),
                 artist_count=("artist", "count"),
                 total_plays=("total_plays", "sum"),
                 discovery_year=("discovery_year", "min"),
@@ -264,19 +268,44 @@ def render_discovery_zones() -> None:
 
     st.divider()
 
-    # ── Per-artist discovery table ─────────────────────────────────────────────
-    st.subheader("All Discoveries")
+    # ── Per-artist discovery table with city & year filters ────────────────────
+    st.subheader("Artist Discoveries")
+
+    # Append total plays before filtering so sorting is consistent
+    artist_total: pd.Series = df["artist"].value_counts()
     display_first = first_plays.copy()
+    display_first["total_plays"] = display_first["artist"].map(artist_total).fillna(0).astype(int)
+
+    # Build filter options
+    filter_col1, filter_col2 = st.columns(2)
+
+    city_options: list[str] = ["All cities"]
+    if "city" in display_first.columns:
+        city_options += sorted(display_first["city"].dropna().unique().tolist())
+    selected_city: str = filter_col1.selectbox("Filter by city", city_options, key="dz_city")
+
+    year_options: list[str] = ["All years"]
+    if "discovery_year" in display_first.columns:
+        year_options += [
+            str(y)
+            for y in sorted(display_first["discovery_year"].dropna().unique().astype(int).tolist())
+        ]
+    selected_year: str = filter_col2.selectbox("Filter by year", year_options, key="dz_year")
+
+    # Apply filters
+    filtered = display_first.copy()
+    if selected_city != "All cities" and "city" in filtered.columns:
+        filtered = filtered[filtered["city"] == selected_city]
+    if selected_year != "All years" and "discovery_year" in filtered.columns:
+        filtered = filtered[filtered["discovery_year"] == int(selected_year)]
+
     show_cols = [
-        c for c in ["artist", "date_text", "city", "country", "track"] if c in display_first.columns
+        c for c in ["artist", "date_text", "city", "country", "track"] if c in filtered.columns
     ]
     if "date_text" in show_cols:
-        display_first["date_text"] = display_first["date_text"].dt.strftime("%Y-%m-%d")
+        filtered = filtered.copy()
+        filtered["date_text"] = filtered["date_text"].dt.strftime("%Y-%m-%d")
 
-    # Append total plays for each artist from the full dataset
-    artist_total: pd.Series = df["artist"].value_counts()
-    display_first["total_plays"] = display_first["artist"].map(artist_total).fillna(0).astype(int)
-    show_cols_final = show_cols + ["total_plays"]
     rename_map = {
         "artist": "Artist",
         "date_text": "First Heard",
@@ -285,8 +314,9 @@ def render_discovery_zones() -> None:
         "track": "Track",
         "total_plays": "Total Plays",
     }
+    st.caption(f"{len(filtered):,} artists")
     st.dataframe(
-        display_first[show_cols_final]
+        filtered[show_cols + ["total_plays"]]
         .rename(columns=rename_map)
         .sort_values("Total Plays", ascending=False),
         hide_index=True,
