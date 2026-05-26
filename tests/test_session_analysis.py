@@ -295,10 +295,17 @@ class TestRenderDeepMusicSmoke(unittest.TestCase):
         mock_load_cache.return_value = self._make_session_stats_dict()
 
         # Stub common st.* calls that render_deep_music is likely to make
+        def _make_col_cm() -> MagicMock:
+            cm = MagicMock()
+            cm.__enter__ = MagicMock(return_value=cm)
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
         mock_st.tabs.return_value = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
-        mock_st.columns.return_value = [MagicMock(), MagicMock()]
+        mock_st.columns.return_value = [_make_col_cm(), _make_col_cm()]
         mock_st.session_state = {}
         mock_st.stop = MagicMock()
+        mock_st.selectbox.return_value = "All"
 
         from pages.deep_music import render_deep_music
 

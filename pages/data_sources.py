@@ -614,6 +614,7 @@ def _render_deep_analysis_compute(broker: Any) -> None:
                         loyalty_score = analysis_utils.get_loyalty_score(df)
                         comfort = analysis_utils.get_comfort_ratio(df)
                         album_depth = analysis_utils.get_album_sequence_depth(df)
+                        album_familiarity = analysis_utils.get_album_plays_by_familiarity(df)
                         analysis_utils.save_deep_personality_cache(
                             {
                                 "gini": gini,
@@ -621,6 +622,7 @@ def _render_deep_analysis_compute(broker: Any) -> None:
                                 "monthly_new_artists": monthly_new.to_dict(orient="records"),
                                 "comfort_ratio": comfort.to_dict(orient="records"),
                                 "album_depth": album_depth.to_dict(orient="records"),
+                                "album_familiarity": album_familiarity.to_dict(orient="records"),
                             }
                         )
                     elif _key == "arcs":
@@ -817,7 +819,8 @@ def render_data_sources() -> None:
             c2.metric("Stale", counts["stale"])
             c3.metric("Issues", counts["error"] + counts["unconfigured"])
 
-    with cache_tab:
-        _render_cache_tab()
         st.divider()
         _render_deep_analysis_compute(st.session_state.get("df"))
+
+    with cache_tab:
+        _render_cache_tab()

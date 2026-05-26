@@ -373,7 +373,7 @@ class TestArtistArcsTabNotStub(unittest.TestCase):
             patch("streamlit.metric"),
             patch("streamlit.stop"),
             patch("streamlit.info"),
-            patch("streamlit.selectbox", return_value="Obsession Artist"),
+            patch("streamlit.selectbox", side_effect=["All", "Obsession Artist"]),
             patch("streamlit.tabs", side_effect=fake_tabs),
             patch("streamlit.dataframe", side_effect=fake_dataframe),
             patch("streamlit.bar_chart", side_effect=fake_bar_chart),

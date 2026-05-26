@@ -1679,6 +1679,23 @@ def _load_deep_cache(path: str) -> Any:
         return None
 
 
+class _DeepCacheEncoder(json.JSONEncoder):
+    """JSON encoder that handles pandas/numpy types produced by deep analyses."""
+
+    def default(self, obj: Any) -> Any:
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+        if isinstance(obj, pd.Period):
+            return str(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
 def _save_deep_cache(data: Any, path: str) -> None:
     """Persist deep analysis data to a JSON cache file.
 
@@ -1688,7 +1705,7 @@ def _save_deep_cache(data: Any, path: str) -> None:
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+        json.dump(data, fh, indent=2, cls=_DeepCacheEncoder)
 
 
 def load_deep_sessions_cache(path: str = DEEP_SESSIONS_CACHE) -> Any:
@@ -2171,6 +2188,44 @@ def get_comfort_ratio(df: pd.DataFrame) -> pd.DataFrame:
     total = pivot["familiar_plays"] + pivot["new_plays"]
     pivot["comfort_ratio"] = pivot["familiar_plays"] / total.where(total > 0, other=1.0)
     return pivot[cols]
+
+
+def get_album_plays_by_familiarity(df: pd.DataFrame) -> pd.DataFrame:
+    """Album play counts split by whether the artist was familiar or new that month.
+
+    Uses the same familiar/new tagging as :func:`get_comfort_ratio`: an artist is
+    "new" in the month of their first ever play, and "familiar" in all subsequent months.
+
+    Args:
+        df: Last.fm-style DataFrame with ``date_text`` (datetime), ``artist``, and
+            ``album`` columns.
+
+    Returns:
+        DataFrame with columns ``month`` (UTC datetime), ``play_type``
+        (``"familiar"`` or ``"new"``), ``artist``, ``album``, ``plays`` (int),
+        sorted by ``month`` ascending then ``plays`` descending.
+    """
+    out_cols = ["month", "play_type", "artist", "album", "plays"]
+    if df.empty or "album" not in df.columns:
+        return pd.DataFrame(columns=out_cols)
+
+    work = df[["date_text", "artist", "album"]].copy()
+    work["date_text"] = pd.to_datetime(work["date_text"], utc=True)
+    month_start = work["date_text"].dt.to_period("M").dt.to_timestamp(freq="D", how="start")
+    work["month"] = month_start.dt.tz_localize("UTC")
+
+    first_month = work.groupby("artist")["month"].min().rename("first_month")
+    work = work.join(first_month, on="artist")
+    work["play_type"] = np.where(work["month"] == work["first_month"], "new", "familiar")
+
+    result = (
+        work.groupby(["month", "play_type", "artist", "album"])
+        .size()
+        .reset_index(name="plays")
+        .sort_values(["month", "plays"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+    return result[out_cols]
 
 
 def get_artist_lifecycle(df: pd.DataFrame, artist: str) -> dict[str, Any]:

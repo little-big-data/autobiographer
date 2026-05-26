@@ -316,6 +316,22 @@ class TestPersonalityTabNotStub(unittest.TestCase):
                 }
             ],
             "album_depth": [{"artist": "Artist A", "album": "Album X", "deep_listen_count": 2}],
+            "album_familiarity": [
+                {
+                    "month": "2020-01-01",
+                    "play_type": "familiar",
+                    "artist": "Artist A",
+                    "album": "Album X",
+                    "plays": 8,
+                },
+                {
+                    "month": "2020-01-01",
+                    "play_type": "new",
+                    "artist": "New Artist",
+                    "album": "Debut Album",
+                    "plays": 5,
+                },
+            ],
         }
 
         # A minimal valid sessions cache (so the page doesn't stop at sessions banner)
@@ -382,6 +398,8 @@ class TestPersonalityTabNotStub(unittest.TestCase):
             patch("streamlit.metric", side_effect=fake_metric),
             patch("streamlit.bar_chart", side_effect=fake_bar_chart),
             patch("streamlit.dataframe", side_effect=fake_dataframe),
+            patch("streamlit.selectbox", return_value="All"),
+            patch("streamlit.columns", return_value=[make_tab_cm(), make_tab_cm()]),
             patch("pages.deep_music._deep_analysis_not_computed_banner"),
             patch(
                 "pages.deep_music.get_session_opening_tracks",

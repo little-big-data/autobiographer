@@ -50,8 +50,10 @@ def render_deep_music() -> None:
         else:
             # Session length histogram
             st.markdown("#### Session Length Distribution")
-            if "duration_minutes" in session_stats.columns:
-                st.bar_chart(session_stats["duration_minutes"].value_counts().sort_index())
+            if "track_count" in session_stats.columns:
+                counts = session_stats["track_count"]
+                counts = counts[counts >= 2]
+                st.bar_chart(counts.value_counts().sort_index())
 
             # Time-of-day bar chart
             st.markdown("#### Sessions by Hour of Day")
@@ -84,20 +86,84 @@ def render_deep_music() -> None:
                 "Loyalty Score", f"{loyalty:.2%}", help="Fraction of old artists still played"
             )
 
+            # Build year filter from available month data
             comfort_records = personality_cache.get("comfort_ratio", [])
+            monthly_records = personality_cache.get("monthly_new_artists", [])
+            all_months: list[str] = [r["month"] for r in comfort_records if "month" in r] + [
+                r["month"] for r in monthly_records if "month" in r
+            ]
+            available_years = sorted(
+                {m[:4] for m in all_months if isinstance(m, str) and len(m) >= 4}
+            )
+            year_options = ["All"] + available_years
+            selected_year = st.selectbox("Year", year_options, key="personality_year")
+
+            def _filter_by_year(df: pd.DataFrame, year: str) -> pd.DataFrame:
+                if year == "All" or "month" not in df.columns:
+                    return df
+                return df[df["month"].astype(str).str.startswith(year)]
+
+            def _month_label(df: pd.DataFrame) -> pd.DataFrame:
+                """Replace the month column with a YYYY-MM string for clean axis labels."""
+                df = df.copy()
+                df["month"] = pd.to_datetime(df["month"], utc=True, errors="coerce").dt.strftime(
+                    "%Y-%m"
+                )
+                return df
+
             if comfort_records:
                 comfort_df = pd.DataFrame(comfort_records)
                 st.markdown("#### Familiar vs New Plays by Month")
                 if "month" in comfort_df.columns:
-                    chart_df = comfort_df.set_index("month")[["familiar_plays", "new_plays"]]
+                    view = _month_label(_filter_by_year(comfort_df, selected_year))
+                    chart_df = view.set_index("month")[["familiar_plays", "new_plays"]]
                     st.bar_chart(chart_df, width="stretch")
 
-            monthly_records = personality_cache.get("monthly_new_artists", [])
             if monthly_records:
                 monthly_df = pd.DataFrame(monthly_records)
                 st.markdown("#### New Artists Discovered per Month")
                 if "month" in monthly_df.columns:
-                    st.bar_chart(monthly_df.set_index("month")["new_artists"], width="stretch")
+                    view = _month_label(_filter_by_year(monthly_df, selected_year))
+                    st.bar_chart(view.set_index("month")["new_artists"], width="stretch")
+
+            # Album tables split by familiarity
+            familiarity_records = personality_cache.get("album_familiarity", [])
+            if familiarity_records:
+                fam_df = pd.DataFrame(familiarity_records)
+                fam_view = _filter_by_year(fam_df, selected_year)
+
+                familiar_albums = (
+                    fam_view[fam_view["play_type"] == "familiar"]
+                    .groupby(["artist", "album"], sort=False)["plays"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("plays", ascending=False)
+                    .head(15)
+                    .reset_index(drop=True)
+                )
+                new_albums = (
+                    fam_view[fam_view["play_type"] == "new"]
+                    .groupby(["artist", "album"], sort=False)["plays"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("plays", ascending=False)
+                    .head(15)
+                    .reset_index(drop=True)
+                )
+
+                col_fam, col_new = st.columns(2)
+                with col_fam:
+                    st.markdown("#### Top Familiar Album Listens")
+                    if not familiar_albums.empty:
+                        st.dataframe(familiar_albums, width="stretch")
+                    else:
+                        st.info("No familiar album data for this period.")
+                with col_new:
+                    st.markdown("#### New Artist Album Listens")
+                    if not new_albums.empty:
+                        st.dataframe(new_albums, width="stretch")
+                    else:
+                        st.info("No new artist album data for this period.")
 
             album_records = personality_cache.get("album_depth", [])
             if album_records:
