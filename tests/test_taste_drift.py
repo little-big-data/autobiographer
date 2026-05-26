@@ -512,8 +512,17 @@ class TestRenderTasteDriftSmoke(unittest.TestCase):
             ),
             patch("pages.taste_drift.st") as mock_st,
         ):
+
+            def _make_cm() -> MagicMock:
+                cm = MagicMock()
+                cm.__enter__ = MagicMock(return_value=cm)
+                cm.__exit__ = MagicMock(return_value=False)
+                return cm
+
             mock_st.tabs.return_value = tab_mocks
-            mock_st.columns.return_value = col_mocks
+            mock_st.columns.side_effect = lambda n: [_make_cm() for _ in range(n)]
+            mock_st.expander.return_value = _make_cm()
+            mock_st.selectbox.return_value = "All"
             mock_st.stop = MagicMock()
 
             # Should not raise
