@@ -7,6 +7,7 @@ from analysis_utils import (
     get_artist_monthly_ranks,
     get_cumulative_plays,
     get_day_hour_heatmap,
+    get_first_plays,
     get_forgotten_favorites,
     get_genre_weekly,
     get_hourly_distribution,
@@ -185,6 +186,81 @@ class TestAnalysisUtils(unittest.TestCase):
         empty = pd.DataFrame(columns=["artist", "date_text"])
         result = get_artist_monthly_ranks(empty)
         self.assertTrue(result.empty)
+
+    # ── get_first_plays ───────────────────────────────────────────────────────
+
+    def test_get_first_plays_returns_one_row_per_artist(self):
+        df = pd.DataFrame(
+            {
+                "artist": ["Artist A", "Artist A", "Artist B"],
+                "track": ["Song 1", "Song 2", "Song 3"],
+                "timestamp": [1000, 2000, 1500],
+                "date_text": pd.to_datetime(["2021-01-01", "2021-01-02", "2021-01-01"]),
+            }
+        )
+        result = get_first_plays(df)
+        self.assertEqual(len(result), 2)
+        self.assertIn("Artist A", result["artist"].values)
+        self.assertIn("Artist B", result["artist"].values)
+
+    def test_get_first_plays_selects_earliest_timestamp(self):
+        df = pd.DataFrame(
+            {
+                "artist": ["Artist A", "Artist A"],
+                "track": ["Early Song", "Later Song"],
+                "timestamp": [1000, 9000],
+                "date_text": pd.to_datetime(["2021-01-01", "2021-06-01"]),
+            }
+        )
+        result = get_first_plays(df)
+        self.assertEqual(len(result), 1)
+        # The first play row should carry the earliest track
+        self.assertEqual(result.iloc[0]["track"], "Early Song")
+
+    def test_get_first_plays_sorted_by_timestamp(self):
+        df = pd.DataFrame(
+            {
+                "artist": ["Artist B", "Artist A"],
+                "track": ["B Song", "A Song"],
+                "timestamp": [2000, 1000],
+                "date_text": pd.to_datetime(["2021-02-01", "2021-01-01"]),
+            }
+        )
+        result = get_first_plays(df)
+        self.assertEqual(result.iloc[0]["artist"], "Artist A")
+        self.assertEqual(result.iloc[1]["artist"], "Artist B")
+
+    def test_get_first_plays_empty_input_returns_empty(self):
+        empty = pd.DataFrame(columns=["artist", "timestamp"])
+        result = get_first_plays(empty)
+        self.assertTrue(result.empty)
+
+    def test_get_first_plays_missing_timestamp_returns_empty(self):
+        df = pd.DataFrame({"artist": ["Artist A"], "track": ["Song"]})
+        result = get_first_plays(df)
+        self.assertTrue(result.empty)
+
+    def test_get_first_plays_missing_artist_returns_empty(self):
+        df = pd.DataFrame({"timestamp": [1000], "track": ["Song"]})
+        result = get_first_plays(df)
+        self.assertTrue(result.empty)
+
+    def test_get_first_plays_preserves_extra_columns(self):
+        df = pd.DataFrame(
+            {
+                "artist": ["Artist A"],
+                "track": ["Song"],
+                "timestamp": [1000],
+                "date_text": pd.to_datetime(["2021-01-01"]),
+                "city": ["Reykjavik"],
+                "lat": [64.1],
+                "lng": [-21.8],
+            }
+        )
+        result = get_first_plays(df)
+        self.assertIn("city", result.columns)
+        self.assertIn("lat", result.columns)
+        self.assertEqual(result.iloc[0]["city"], "Reykjavik")
 
 
 class TestSwarmAnalysisCaches(unittest.TestCase):

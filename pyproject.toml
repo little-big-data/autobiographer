@@ -19,6 +19,7 @@ dependencies = [
     "imageio>=2.34",
     "imageio-ffmpeg>=0.5",
     "rich>=13.0",
+    "ruptures>=1.1",
 ]
 
 [project.optional-dependencies]
@@ -62,7 +63,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.9"
-files = ["autobiographer.py", "analysis_utils.py", "visualize.py", "record_flythrough.py", "find_checkin.py", "export_html.py", "tools", "core"]
+files = ["autobiographer.py", "analysis_utils.py", "visualize.py", "record_flythrough.py", "find_checkin.py", "export_html.py", "narrative.py", "tools", "core"]
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_return_any = true
