@@ -19,16 +19,21 @@ from dotenv import load_dotenv
 import components.theme  # registers autobio_dark Plotly template as default  # noqa: F401
 from components.sidebar import render_sidebar
 from pages.beer import render_beer
+from pages.city_soundtracks import render_city_soundtracks
 from pages.culture import render_culture
 from pages.data_sources import render_data_sources, render_plugin_page
+from pages.deep_music import render_deep_music
 from pages.fitness import render_fitness
 from pages.geo_explorer import render_geo_explorer
 from pages.insights import render_insights, render_insights_and_narrative  # noqa: F401
+from pages.life_events import render_life_events
 from pages.life_in_chapters import render_life_in_chapters
 from pages.listening_lifestyle import render_listening_lifestyle
 from pages.music import render_music, render_top_charts  # noqa: F401
 from pages.overview import render_overview  # noqa: F401
 from pages.places import render_checkin_insights  # noqa: F401
+from pages.taste_drift import render_taste_drift
+from pages.venue_patterns import render_venue_patterns
 from plugins.sources import REGISTRY, load_builtin_plugins
 
 load_dotenv()
@@ -135,10 +140,35 @@ def main() -> None:
                     title="Listening Lifestyle",
                     icon=":material/self_improvement:",
                 ),
+                st.Page(
+                    render_deep_music,
+                    title="Deep Music Analysis",
+                    icon=":material/insights:",
+                ),
+                st.Page(
+                    render_taste_drift,
+                    title="Geographic Taste Drift",
+                    icon=":material/travel_explore:",
+                ),
+                st.Page(
+                    render_life_events,
+                    title="Life Event Detection",
+                    icon=":material/timeline:",
+                ),
             ],
             "Places": [
                 st.Page(
                     render_checkin_insights, title="Check-in Insights", icon=":material/insights:"
+                ),
+                st.Page(
+                    render_city_soundtracks,
+                    title="City Soundtracks",
+                    icon=":material/music_note:",
+                ),
+                st.Page(
+                    render_venue_patterns,
+                    title="Venue Patterns",
+                    icon=":material/place:",
                 ),
             ],
             "Health": [

@@ -8,6 +8,7 @@ import plotly.express as px
 import streamlit as st
 from pandas import DataFrame
 
+import analysis_utils
 from analysis_utils import (
     get_day_hour_heatmap,
     get_forgotten_favorites,
@@ -20,6 +21,7 @@ from analysis_utils import (
 from components.share import render_share_button
 from components.theme import COLORWAY, SEQUENTIAL_SCALE, apply_dark_theme
 from export_html import build_insights_page_html
+from narrative import generate_full_autobiography
 
 
 def render_insights_and_narrative(df: DataFrame) -> None:
@@ -163,6 +165,40 @@ def render_insights_and_narrative(df: DataFrame) -> None:
         st.info("No forgotten favorites identified.")
 
 
+def _render_musical_story(df: DataFrame) -> None:
+    """Render the 'Generate My Musical Story' section.
+
+    Args:
+        df: Full listening history DataFrame from session state.
+    """
+    st.markdown("---")
+    st.subheader("Your Musical Story")
+
+    # Check whether deep analysis caches are available for richer output
+    arcs_cache = analysis_utils.load_deep_arcs_cache()
+    life_events_cache = analysis_utils.load_deep_life_events_cache()
+    if arcs_cache is None or life_events_cache is None:
+        st.info("Run Calculate All Deep Analyses first for the richest story")
+
+    if st.button("Generate My Musical Story"):
+        assumptions: dict = st.session_state.get("assumptions", {}) or {}
+        swarm_df = st.session_state.get("swarm_df")
+        with st.spinner("Writing your story…"):
+            generated = generate_full_autobiography(df, assumptions, swarm_df=swarm_df)
+        st.session_state["_musical_story"] = generated
+
+    displayed_story: str = st.session_state.get("_musical_story", "")
+    if displayed_story:
+        with st.container():
+            st.markdown(displayed_story)
+        st.download_button(
+            "Download as Markdown",
+            data=displayed_story,
+            file_name="my_musical_story.md",
+            mime="text/markdown",
+        )
+
+
 def render_insights() -> None:
     """Render the Insights page.
 
@@ -179,3 +215,5 @@ def render_insights() -> None:
 
     with st.spinner("Loading insights..."):
         render_insights_and_narrative(df)
+
+    _render_musical_story(df)
