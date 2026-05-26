@@ -340,6 +340,12 @@ class TestArtistArcsTabNotStub(unittest.TestCase):
         bar_chart_calls: list[object] = []
         plotly_calls: list[object] = []
 
+        def _make_cm() -> MagicMock:
+            cm = MagicMock()
+            cm.__enter__ = MagicMock(return_value=cm)
+            cm.__exit__ = MagicMock(return_value=False)
+            return cm
+
         def fake_tabs(tab_names: list[str]) -> list[MagicMock]:
             tabs_call_args.append(list(tab_names))
             # Return enough tab context managers for however many tabs are requested
@@ -375,6 +381,7 @@ class TestArtistArcsTabNotStub(unittest.TestCase):
             patch("streamlit.info"),
             patch("streamlit.selectbox", side_effect=["All", "Obsession Artist"]),
             patch("streamlit.tabs", side_effect=fake_tabs),
+            patch("streamlit.columns", side_effect=lambda n: [_make_cm() for _ in range(n)]),
             patch("streamlit.dataframe", side_effect=fake_dataframe),
             patch("streamlit.bar_chart", side_effect=fake_bar_chart),
             patch("streamlit.plotly_chart", side_effect=fake_plotly_chart),

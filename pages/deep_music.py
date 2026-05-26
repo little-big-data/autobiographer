@@ -207,6 +207,58 @@ def render_deep_music() -> None:
                 else:
                     st.info("No obsession arcs found.")
 
+                # One-hit, perennial, rediscovery tables
+                arc_cols = st.columns(3)
+                with arc_cols[0]:
+                    st.markdown("#### One-Hit Wonders")
+                    one_hit = arcs_df[arcs_df["arc_type"] == "one-hit"].sort_values(
+                        "total_plays", ascending=False
+                    )
+                    if not one_hit.empty:
+                        st.dataframe(
+                            one_hit[
+                                ["artist", "total_plays", "discovery_date", "last_play"]
+                            ].reset_index(drop=True),
+                            width="stretch",
+                        )
+                    else:
+                        st.info("No one-hit wonders found.")
+
+                with arc_cols[1]:
+                    st.markdown("#### Perennial Favourites")
+                    perennial = arcs_df[arcs_df["arc_type"] == "perennial"].sort_values(
+                        "total_plays", ascending=False
+                    )
+                    if not perennial.empty:
+                        st.dataframe(
+                            perennial[
+                                ["artist", "total_plays", "peak_plays", "discovery_date"]
+                            ].reset_index(drop=True),
+                            width="stretch",
+                        )
+                    else:
+                        st.info("No perennial artists found.")
+
+                with arc_cols[2]:
+                    st.markdown("#### Rediscoveries")
+                    rediscovery = arcs_df[arcs_df["arc_type"] == "rediscovery"].sort_values(
+                        "peak_plays", ascending=False
+                    )
+                    if not rediscovery.empty:
+                        _rd_cols = [
+                            "artist",
+                            "total_plays",
+                            "peak_plays",
+                            "peak_month",
+                            "discovery_date",
+                        ]
+                        st.dataframe(
+                            rediscovery[_rd_cols].reset_index(drop=True),
+                            width="stretch",
+                        )
+                    else:
+                        st.info("No rediscoveries found.")
+
                 # Artist lifecycle selector
                 st.markdown("#### Artist Monthly Plays")
                 artist_options = arcs_df["artist"].tolist()

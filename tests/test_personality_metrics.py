@@ -399,7 +399,7 @@ class TestPersonalityTabNotStub(unittest.TestCase):
             patch("streamlit.bar_chart", side_effect=fake_bar_chart),
             patch("streamlit.dataframe", side_effect=fake_dataframe),
             patch("streamlit.selectbox", return_value="All"),
-            patch("streamlit.columns", return_value=[make_tab_cm(), make_tab_cm()]),
+            patch("streamlit.columns", side_effect=lambda n: [make_tab_cm() for _ in range(n)]),
             patch("pages.deep_music._deep_analysis_not_computed_banner"),
             patch(
                 "pages.deep_music.get_session_opening_tracks",

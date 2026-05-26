@@ -302,7 +302,7 @@ class TestRenderDeepMusicSmoke(unittest.TestCase):
             return cm
 
         mock_st.tabs.return_value = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
-        mock_st.columns.return_value = [_make_col_cm(), _make_col_cm()]
+        mock_st.columns.side_effect = lambda n: [_make_col_cm() for _ in range(n)]
         mock_st.session_state = {}
         mock_st.stop = MagicMock()
         mock_st.selectbox.return_value = "All"
