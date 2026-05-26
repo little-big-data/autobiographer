@@ -8,13 +8,15 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-ruptures: Optional[Any]
-try:
-    import ruptures as _ruptures_imported
 
-    ruptures = _ruptures_imported
-except ImportError:
-    ruptures = None
+def _get_ruptures() -> Optional[Any]:
+    """Lazily import ruptures (pulls in scipy) only when changepoint detection runs."""
+    try:
+        import ruptures as _r
+
+        return _r
+    except (ImportError, Exception):
+        return None
 
 
 def get_cache_key(
@@ -3724,6 +3726,7 @@ def detect_listening_changepoints(
         List of ``pd.Timestamp`` changepoint dates, or ``[]`` if ruptures is
         unavailable, the DataFrame is empty, or segmentation fails.
     """
+    ruptures = _get_ruptures()
     if ruptures is None:
         return []
 

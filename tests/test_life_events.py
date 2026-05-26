@@ -109,17 +109,14 @@ class TestDetectChangepointsNoRuptures:
 
     def test_importerror_returns_empty_list(self) -> None:
         """If the ruptures module is unavailable, return [] gracefully."""
-        # Simulate ruptures being absent by patching the module-level attribute
-        # the implementation will use (either analysis_utils.ruptures = None or
-        # a try/except at import time exposing a None sentinel).
-        with patch.object(analysis_utils, "ruptures", None):
+        with patch.object(analysis_utils, "_get_ruptures", return_value=None):
             df = _weekly_df("2018-01-01", "2022-12-31")
             result = analysis_utils.detect_listening_changepoints(df)
         assert result == [], "Expected [] when ruptures is None/unavailable"
 
     def test_no_exception_propagated(self) -> None:
         """No ImportError or AttributeError may escape when ruptures is absent."""
-        with patch.object(analysis_utils, "ruptures", None):
+        with patch.object(analysis_utils, "_get_ruptures", return_value=None):
             df = _weekly_df("2018-01-01", "2022-12-31")
             try:
                 analysis_utils.detect_listening_changepoints(df)
