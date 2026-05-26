@@ -13,8 +13,24 @@ import shutil
 from datetime import datetime, timezone
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
+from analysis_utils import (
+    DETECTED_TRIPS_CACHE,
+    DINING_CACHE,
+    TRANSIT_DAYS_CACHE,
+    detect_trips_from_swarm,
+    get_dining_soundtrack_data,
+    get_transit_days,
+    load_assumptions,
+    load_detected_trips_cache,
+    load_dining_cache,
+    load_transit_days_cache,
+    save_detected_trips_cache,
+    save_dining_cache,
+    save_transit_days_cache,
+)
 from components.plugin_config import (
     load_config_into_session_state,
     render_plugin_config_fields,
@@ -218,6 +234,178 @@ def _render_plugin_tab(plugin_id: str, plugin: Any) -> dict[str, Any]:
     return health
 
 
+def _render_swarm_analysis() -> None:
+    """Render the Swarm analysis section on the Foursquare/Swarm plugin page.
+
+    Detects trips, computes transit days, and builds the dining soundtrack
+    cache — all in one button click.  Results are persisted to disk so that
+    the Listening Lifestyle and Life in Chapters pages read pre-built caches
+    instead of recomputing on every page visit.
+    """
+    swarm_df: pd.DataFrame | None = st.session_state.get("swarm_df")
+    df: pd.DataFrame | None = st.session_state.get("df")
+
+    # If session state doesn't have swarm data yet, try loading directly from
+    # the configured directory so the cache can be built even before Last.fm
+    # data is loaded (which is required for the sidebar data pipeline to run).
+    if swarm_df is None or (isinstance(swarm_df, pd.DataFrame) and swarm_df.empty):
+        from analysis_utils import load_swarm_data
+        from components.plugin_config import get_plugin_config_from_session
+
+        cfg = get_plugin_config_from_session(
+            "swarm", [{"key": "swarm_dir", "label": "", "type": "dir_path"}]
+        )
+        swarm_dir = cfg.get("swarm_dir", "")
+        if swarm_dir and os.path.exists(swarm_dir):
+            swarm_df = load_swarm_data(swarm_dir)
+            if swarm_df is not None and not swarm_df.empty:
+                # Persist so the sidebar's already_loaded check stays valid
+                # across the st.rerun() triggered by the build button.
+                st.session_state["swarm_df"] = swarm_df
+
+    if swarm_df is None or (isinstance(swarm_df, pd.DataFrame) and swarm_df.empty):
+        st.info(
+            "No Swarm check-in data loaded. "
+            "Select your Swarm export directory above, then reload data in the sidebar."
+        )
+        return
+
+    # ── Cache status ──────────────────────────────────────────────────────────
+    trips_cached = load_detected_trips_cache()
+    transit_days_cached = load_transit_days_cache()
+    dining_cached_data = load_dining_cache()
+
+    if transit_days_cached:
+        transit_label = f"{len(transit_days_cached)} days"
+    elif os.path.exists(TRANSIT_DAYS_CACHE):
+        transit_label = "Empty — rebuild"
+    else:
+        transit_label = "Not built"
+
+    if dining_cached_data:
+        dining_label = f"{len(dining_cached_data)} categories"
+    elif os.path.exists(DINING_CACHE):
+        dining_label = "Empty — rebuild"
+    elif df is None:
+        dining_label = "Needs Last.fm data"
+    else:
+        dining_label = "Not built"
+
+    status_cols = st.columns(3)
+    status_cols[0].metric(
+        "Detected Trips",
+        f"{len(trips_cached)} trip(s)" if trips_cached else "Not built",
+    )
+    status_cols[1].metric("Transit Days Cache", transit_label)
+    status_cols[2].metric("Dining Cache", dining_label)
+
+    st.divider()
+
+    # ── Detection parameters ──────────────────────────────────────────────────
+    loaded_config = st.session_state.get("_loaded_config")
+    assumptions_path: str | None = loaded_config[2] if loaded_config else None
+    assumptions = load_assumptions(assumptions_path)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        radius_km = st.slider(
+            "Distance from home to count as a trip (km)",
+            min_value=20,
+            max_value=300,
+            value=80,
+            step=10,
+            key="swarm_trip_radius_km",
+        )
+    with col_b:
+        gap_days = st.slider(
+            "Days gap between trips",
+            min_value=1,
+            max_value=14,
+            value=2,
+            step=1,
+            key="swarm_trip_gap_days",
+        )
+
+    # ── Build button ──────────────────────────────────────────────────────────
+    building = st.session_state.get("_swarm_building", False)
+    if st.button(
+        ":material/travel_explore: Build Swarm Analysis Cache",
+        key="build_swarm_cache_btn",
+        disabled=building,
+        type="primary",
+    ):
+        st.session_state["_swarm_building"] = True
+        errors: list[str] = []
+
+        with st.spinner("Detecting trips from check-ins…"):
+            try:
+                trips = detect_trips_from_swarm(
+                    swarm_df,
+                    assumptions,
+                    radius_km=float(radius_km),
+                    gap_days=int(gap_days),
+                )
+                if trips or not load_detected_trips_cache():
+                    save_detected_trips_cache(trips)
+                elif not trips:
+                    st.warning(
+                        "Trip detection found 0 trips — existing cache preserved. "
+                        "Check that your assumptions file has a home location."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Trip detection failed: {exc}")
+
+        with st.spinner("Computing transit days…"):
+            try:
+                transit_days = get_transit_days(swarm_df)
+                if transit_days or not load_transit_days_cache():
+                    save_transit_days_cache(transit_days)
+                elif not transit_days:
+                    st.warning(
+                        "No transit check-ins found — existing cache preserved. "
+                        "Transit days require airport, train, or bus check-ins."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Transit days failed: {exc}")
+
+        if df is not None and not df.empty:
+            with st.spinner("Building dining soundtrack data…"):
+                try:
+                    dining = get_dining_soundtrack_data(swarm_df, df)
+                    if dining or not load_dining_cache():
+                        save_dining_cache(dining)
+                    elif not dining:
+                        st.warning(
+                            "No dining check-ins found — existing cache preserved. "
+                            "Dining data requires restaurant, bar, or café check-ins."
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"Dining cache failed: {exc}")
+        else:
+            st.caption(
+                "Last.fm data not loaded — dining cache skipped. "
+                "Load your music data in the sidebar and re-run to include dining."
+            )
+
+        st.session_state["_swarm_building"] = False
+
+        if errors:
+            for err in errors:
+                st.error(err)
+        else:
+            st.success(
+                f"Cache built: {len(trips)} trip(s) detected, "
+                f"{len(transit_days)} transit day(s) indexed."
+            )
+        st.rerun()
+
+    if trips_cached:
+        st.caption(
+            f"Detected trips cache: `{DETECTED_TRIPS_CACHE}` · "
+            f"Transit: `{TRANSIT_DAYS_CACHE}` · Dining: `{DINING_CACHE}`"
+        )
+
+
 def render_plugin_page(plugin_id: str) -> None:
     """Render the standalone management page for a single plugin.
 
@@ -260,6 +448,15 @@ def render_plugin_page(plugin_id: str) -> None:
 
     st.title(plugin.DISPLAY_NAME)
     _render_plugin_tab(plugin_id, plugin)
+
+    if plugin_id == "swarm":
+        st.divider()
+        st.subheader(":material/travel_explore: Swarm Analysis Cache")
+        st.caption(
+            "Pre-compute trips, transit days, and dining soundtrack data from your check-ins. "
+            "These caches power the **Life in Chapters** and **Listening Lifestyle** pages."
+        )
+        _render_swarm_analysis()
 
 
 def _render_cache_tab() -> None:

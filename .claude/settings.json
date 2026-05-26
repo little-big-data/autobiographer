@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(ruff *)",
+      "Bash(mypy *)",
+      "Bash(mypy)",
+      "Bash(pytest *)",
+      "Bash(pytest)",
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(source venv/Scripts/activate)",
+      "Bash(source venv/bin/activate)",
+      "Bash(venv/Scripts/python *)",
+      "Bash(venv/Scripts/ruff *)",
+      "Bash(venv/Scripts/mypy *)",
+      "Bash(venv/Scripts/pytest *)",
+      "Bash(venv/Scripts/pip *)",
+      "Bash(venv\\Scripts\\python.exe *)",
+      "Bash(venv\\Scripts\\ruff *)",
+      "Bash(venv\\Scripts\\mypy *)",
+      "Bash(venv\\Scripts\\pytest *)",
+      "Bash(venv\\Scripts\\pip *)",
+      "PowerShell(git *)",
+      "PowerShell(gh *)",
+      "PowerShell(ruff *)",
+      "PowerShell(mypy *)",
+      "PowerShell(pytest *)",
+      "PowerShell(python *)",
+      "PowerShell(venv\\Scripts\\python.exe *)",
+      "PowerShell(venv\\Scripts\\activate)",
+      "PowerShell(venv\\Scripts\\ruff *)",
+      "PowerShell(venv\\Scripts\\mypy *)",
+      "PowerShell(venv\\Scripts\\pytest *)",
+      "PowerShell(venv\\Scripts\\pip *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Content *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Select-Object *)",
+      "PowerShell(Where-Object *)"
+    ]
+  },
+  "worktree": {
+    "symlinkDirectories": ["venv"]
+  }
+}

@@ -211,5 +211,179 @@ class TestGetVersionedOutputPath(unittest.TestCase):
         self.assertNotEqual(path1, path2)
 
 
+class TestRenderSwarmAnalysis(unittest.TestCase):
+    """Smoke tests for _render_swarm_analysis in pages/data_sources.py."""
+
+    def _make_col(self) -> unittest.mock.MagicMock:
+        col = unittest.mock.MagicMock()
+        col.__enter__ = unittest.mock.MagicMock(return_value=col)
+        col.__exit__ = unittest.mock.MagicMock(return_value=False)
+        return col
+
+    @patch("streamlit.info")
+    @patch("streamlit.columns")
+    def test_shows_info_when_no_swarm_data(
+        self, mock_columns: unittest.mock.MagicMock, mock_info: unittest.mock.MagicMock
+    ) -> None:
+        from pages.data_sources import _render_swarm_analysis
+
+        col = self._make_col()
+        mock_columns.return_value = [col, col, col]
+
+        with patch("streamlit.session_state", {"swarm_df": None, "df": None}):
+            _render_swarm_analysis()
+        mock_info.assert_called_once()
+
+    @patch("streamlit.button", return_value=False)
+    @patch("streamlit.slider", return_value=80)
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    def test_renders_status_metrics_when_swarm_loaded(
+        self,
+        mock_columns: unittest.mock.MagicMock,
+        mock_metric: unittest.mock.MagicMock,
+        mock_divider: unittest.mock.MagicMock,
+        mock_caption: unittest.mock.MagicMock,
+        mock_slider: unittest.mock.MagicMock,
+        mock_button: unittest.mock.MagicMock,
+    ) -> None:
+        import pandas as pd
+
+        from pages.data_sources import _render_swarm_analysis
+
+        col = self._make_col()
+
+        def _columns_side_effect(spec: object) -> list[unittest.mock.MagicMock]:
+            n = spec if isinstance(spec, int) else len(spec)  # type: ignore[arg-type]
+            return [col] * n
+
+        mock_columns.side_effect = _columns_side_effect
+
+        swarm_df = pd.DataFrame(
+            {"venue_category": ["Airport"], "timestamp": [1700000000], "lat": [0.0], "lng": [0.0]}
+        )
+        with (
+            patch("streamlit.session_state", {"swarm_df": swarm_df, "df": None}),
+            patch("pages.data_sources.load_detected_trips_cache", return_value=[]),
+            patch("pages.data_sources.load_assumptions", return_value={}),
+        ):
+            _render_swarm_analysis()
+        self.assertTrue(mock_metric.called or col.metric.called)
+
+    @patch("streamlit.button", return_value=False)
+    @patch("streamlit.slider", return_value=80)
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    def test_fallback_load_persists_to_session_state(
+        self,
+        mock_columns: unittest.mock.MagicMock,
+        mock_metric: unittest.mock.MagicMock,
+        mock_divider: unittest.mock.MagicMock,
+        mock_caption: unittest.mock.MagicMock,
+        mock_slider: unittest.mock.MagicMock,
+        mock_button: unittest.mock.MagicMock,
+    ) -> None:
+        """When swarm_df is absent but swarm_dir is configured, load and persist."""
+        import pandas as pd
+
+        from pages.data_sources import _render_swarm_analysis
+
+        col = self._make_col()
+
+        def _cols_side_effect(spec: object) -> list[unittest.mock.MagicMock]:
+            n = spec if isinstance(spec, int) else len(spec)  # type: ignore[arg-type]
+            return [col] * n
+
+        mock_columns.side_effect = _cols_side_effect
+
+        fake_swarm = pd.DataFrame(
+            {"venue_category": ["Airport"], "timestamp": [1700000000], "lat": [0.0], "lng": [0.0]}
+        )
+
+        with tempfile.TemporaryDirectory() as swarm_dir:
+            fake_state: dict = {"swarm_df": None, "df": None, "swarm_swarm_dir": swarm_dir}
+            with (
+                patch("streamlit.session_state", fake_state),
+                patch("analysis_utils.load_swarm_data", return_value=fake_swarm),
+                patch("pages.data_sources.load_detected_trips_cache", return_value=[]),
+                patch("pages.data_sources.load_transit_days_cache", return_value=set()),
+                patch("pages.data_sources.load_dining_cache", return_value={}),
+                patch("pages.data_sources.load_assumptions", return_value={}),
+            ):
+                _render_swarm_analysis()
+
+        self.assertIsNotNone(fake_state.get("swarm_df"))
+
+
+class TestLoadConfigIntoSessionState(unittest.TestCase):
+    """Tests for load_config_into_session_state."""
+
+    def test_sets_absent_key_from_disk(self) -> None:
+        from components.plugin_config import load_config_into_session_state
+
+        fake_cfg = {"lastfm": {"data_path": "/real/path.csv"}}
+        fake_state: dict[str, str] = {}
+
+        with (
+            patch("components.plugin_config.settings") as mock_settings,
+            patch("streamlit.session_state", fake_state),
+        ):
+            mock_settings.get_all_plugin_configs.return_value = fake_cfg
+            load_config_into_session_state()
+
+        self.assertEqual(fake_state.get("lastfm_data_path"), "/real/path.csv")
+
+    def test_restores_empty_string_to_disk_value(self) -> None:
+        """Empty string in session state (widget reset after rerun) is restored."""
+        from components.plugin_config import load_config_into_session_state
+
+        fake_cfg = {"swarm": {"swarm_dir": "/real/swarm/"}}
+        fake_state: dict[str, str] = {"swarm_swarm_dir": ""}
+
+        with (
+            patch("components.plugin_config.settings") as mock_settings,
+            patch("streamlit.session_state", fake_state),
+        ):
+            mock_settings.get_all_plugin_configs.return_value = fake_cfg
+            load_config_into_session_state()
+
+        self.assertEqual(fake_state["swarm_swarm_dir"], "/real/swarm/")
+
+    def test_does_not_overwrite_user_edited_value(self) -> None:
+        from components.plugin_config import load_config_into_session_state
+
+        fake_cfg = {"lastfm": {"data_path": "/disk/path.csv"}}
+        fake_state: dict[str, str] = {"lastfm_data_path": "/user/edit.csv"}
+
+        with (
+            patch("components.plugin_config.settings") as mock_settings,
+            patch("streamlit.session_state", fake_state),
+        ):
+            mock_settings.get_all_plugin_configs.return_value = fake_cfg
+            load_config_into_session_state()
+
+        self.assertEqual(fake_state["lastfm_data_path"], "/user/edit.csv")
+
+    def test_skips_non_string_values(self) -> None:
+        from components.plugin_config import load_config_into_session_state
+
+        fake_cfg = {"lastfm": {"fetch_history": [{"ts": "2026-01-01"}]}}
+        fake_state: dict = {}
+
+        with (
+            patch("components.plugin_config.settings") as mock_settings,
+            patch("streamlit.session_state", fake_state),
+        ):
+            mock_settings.get_all_plugin_configs.return_value = fake_cfg
+            load_config_into_session_state()
+
+        # list value should not be written to session state
+        self.assertNotIn("lastfm_fetch_history", fake_state)
+
+
 if __name__ == "__main__":
     unittest.main()

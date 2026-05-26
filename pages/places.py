@@ -323,7 +323,7 @@ def render_spatial_analysis(df: DataFrame) -> None:
         if csv_path:
             cmd.append(csv_path)
         cmd.extend(["--output", out_path])
-        cmd.extend(["--marker_zoom", str(zoom_level)])
+        cmd.extend(["--marker_size", str(zoom_level)])
         if selected_artist != "All":
             cmd.extend(["--artist", selected_artist])
         if len(date_range) == 2:

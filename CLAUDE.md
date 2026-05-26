@@ -7,12 +7,17 @@ This document serves as the foundational mandate for all development work perfor
 *   **Branch first**: Always create a new feature branch before making changes; never push directly to an existing PR's branch unless explicitly told to.
 *   **Test before push**: After resolving conflicts or making multi-file changes, run the full test suite before pushing.
 *   **Verify branch target**: When pushing, confirm the branch name matches the intended PR target.
+*   **"Push to a PR" means open a Pull Request**: When asked to push to a PR, create a PR, or submit a PR — commit staged changes, push the branch, then immediately open a GitHub Pull Request using `gh pr create`. The PR must include: a descriptive title (under 70 chars), a `## Summary` section with bullet points, and a `## Test plan` section with a markdown checklist of steps to verify the feature. Do not stop at pushing the branch.
 
 ## Python Environment
 
 *   **Use the venv**: Always activate the project venv (`venv/`) before running Python commands or installing packages; do not use system Python.
 *   **Verify installs**: After installing a package, confirm it landed in the venv with `which python` and `pip list` before assuming a fix worked.
 *   **pyproject.toml is canonical**: Any package imported in source must be listed in `pyproject.toml [project.dependencies]`. `requirements.txt` is for local venv convenience only — CI installs from `pyproject.toml`.
+
+## Streamlit API deprecations
+
+*   **`use_container_width` is removed**: Use `width="stretch"` instead of `use_container_width=True`, and `width="content"` instead of `use_container_width=False`. Never write `use_container_width` — it was removed after 2025-12-31.
 
 ## Streamlit Conventions
 

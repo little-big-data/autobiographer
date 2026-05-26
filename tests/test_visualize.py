@@ -20,6 +20,7 @@ from components.plugin_config import (
 )
 from core.local_settings import LocalSettings
 from pages.insights import render_insights_and_narrative
+from pages.life_in_chapters import render_life_in_chapters
 from pages.music import (
     _filter_by_date,
     _pct_delta,
@@ -633,6 +634,21 @@ class TestMusicHelpers(unittest.TestCase):
         st.session_state["df"] = None
         render_music()
         mock_info.assert_called_once()
+
+    @patch("streamlit.info")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_render_life_in_chapters_empty_state(
+        self,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_info: MagicMock,
+    ) -> None:
+        """render_life_in_chapters shows empty state info when df is None."""
+        with patch("streamlit.session_state", {"df": None}):
+            render_life_in_chapters()
+        mock_info.assert_called_once()
+        mock_header.assert_called_with("Life in Chapters")
 
 
 if __name__ == "__main__":

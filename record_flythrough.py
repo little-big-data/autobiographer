@@ -21,6 +21,7 @@ from components.theme import (
     MAP_COUNTRY_VISITED_RGBA,
     MAP_STATE_BORDER_RGBA,
 )
+from pages.geo_explorer import build_state_highlight_layer
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -196,9 +197,10 @@ def create_recording_assets(
     artist: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    marker_zoom: float = 3.0,
+    marker_size: float = 5.5,
     swarm_dir: str | None = None,
     assumptions_path: str | None = None,
+    highlight_states: list[str] | None = None,
 ) -> tuple | None:
     """Load data and prepare the PyDeck object and keyframes."""
     if not csv_path:
@@ -244,7 +246,7 @@ def create_recording_assets(
     geo_data["elevation_log"] = np.log1p(geo_data["Plays"])
     max_log = geo_data["elevation_log"].max()
 
-    dynamic_radius = 50000 / (2 ** (marker_zoom - 1))
+    dynamic_radius = 50000 / (2 ** (marker_size - 1))
     geo_data["elevation"] = (
         (geo_data["elevation_log"] / max_log) * (1.4 * dynamic_radius) if max_log > 0 else 0
     )
@@ -373,6 +375,12 @@ def create_recording_assets(
                 )
             )
 
+    # State polygon outlines (match Geo Explorer 3D Globe appearance)
+    if highlight_states:
+        state_layer = build_state_highlight_layer(highlight_states)
+        if state_layer is not None:
+            geo_layers.insert(0, state_layer)
+
     deck = pdk.Deck(
         layers=[*geo_layers, layer],
         initial_view_state=pdk.ViewState(**vs_init),
@@ -397,10 +405,10 @@ def main() -> None:
     parser.add_argument("--start_date", help="Inclusive start date filter (YYYY-MM-DD)")
     parser.add_argument("--end_date", help="Inclusive end date filter (YYYY-MM-DD)")
     parser.add_argument(
-        "--marker_zoom",
+        "--marker_size",
         type=float,
-        default=3.0,
-        help="Marker size scaling: higher values produce smaller, more precise markers (default: 3.0)",
+        default=5.5,
+        help="Marker size scaling: higher values produce smaller, more precise markers (default: 5.5)",
     )
     parser.add_argument("--fps", type=int, default=30, help="Video frame rate (default: 30)")
     parser.add_argument(
@@ -422,16 +430,26 @@ def main() -> None:
         action="store_true",
         help="Retain the temporary per-frame PNG files after encoding",
     )
+    parser.add_argument(
+        "--highlight_states",
+        help="Comma-separated US state abbreviations to highlight (e.g. 'IL,MD')",
+    )
 
     args = parser.parse_args()
+    highlight_states = (
+        [s.strip() for s in args.highlight_states.split(",") if s.strip()]
+        if args.highlight_states
+        else None
+    )
     result = create_recording_assets(
         args.csv,
         artist=args.artist,
         start_date=args.start_date,
         end_date=args.end_date,
-        marker_zoom=args.marker_zoom,
+        marker_size=args.marker_size,
         swarm_dir=args.swarm_dir,
         assumptions_path=args.assumptions,
+        highlight_states=highlight_states,
     )
 
     if result is None:

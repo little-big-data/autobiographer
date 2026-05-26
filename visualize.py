@@ -23,14 +23,13 @@ from pages.culture import render_culture
 from pages.data_sources import render_data_sources, render_plugin_page
 from pages.discovery_zones import render_discovery_zones
 from pages.fitness import render_fitness
+from pages.geo_explorer import render_geo_explorer
 from pages.insights import render_insights, render_insights_and_narrative  # noqa: F401
+from pages.life_in_chapters import render_life_in_chapters
+from pages.listening_lifestyle import render_listening_lifestyle
 from pages.music import render_music, render_top_charts  # noqa: F401
 from pages.overview import render_overview  # noqa: F401
-from pages.places import (  # noqa: F401
-    render_checkin_insights,
-    render_places,
-    render_spatial_analysis,
-)
+from pages.places import render_checkin_insights  # noqa: F401
 from plugins.sources import REGISTRY, load_builtin_plugins
 
 load_dotenv()
@@ -122,15 +121,27 @@ def main() -> None:
         {
             "Overview": [
                 st.Page(render_overview, title="Overview", icon=":material/dashboard:"),
+                st.Page(render_geo_explorer, title="Geo Explorer", icon=":material/explore:"),
             ],
             "Music": [
                 st.Page(render_music, title="Listening", icon=":material/headphones:"),
                 st.Page(render_insights, title="Insights", icon=":material/auto_stories:"),
                 st.Page(render_discovery_zones, title="Discovery Zones", icon=":material/explore:"),
+                st.Page(
+                    render_life_in_chapters,
+                    title="Life in Chapters",
+                    icon=":material/auto_stories:",
+                ),
+                st.Page(
+                    render_listening_lifestyle,
+                    title="Listening Lifestyle",
+                    icon=":material/self_improvement:",
+                ),
             ],
             "Places": [
-                st.Page(render_places, title="Check-ins", icon=":material/location_on:"),
-                st.Page(render_checkin_insights, title="Insights", icon=":material/insights:"),
+                st.Page(
+                    render_checkin_insights, title="Check-in Insights", icon=":material/insights:"
+                ),
             ],
             "Health": [
                 st.Page(render_fitness, title="Fitness", icon=":material/fitness_center:"),

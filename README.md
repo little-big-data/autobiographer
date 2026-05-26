@@ -14,11 +14,13 @@ Autobiographer is a Python-based toolkit that lets you fetch, store, and explore
 ## Features
 
 - **Plugin-Based Data Fetching**: Each source plugin handles its own fetch workflow. Plugins that support automatic retrieval (e.g. Last.fm) download data with one command; plugins that require a manual export (e.g. Foursquare/Swarm) print step-by-step instructions. Run `python autobiographer.py list` to see every plugin's status and required configuration.
-- **Interactive Dashboard**: A multi-tab Streamlit dashboard with:
-    - **Overview**: Top Artists, Albums, and Tracks.
-    - **Timeline**: Daily, Weekly, and Monthly listening activity with cumulative growth.
-    - **Patterns**: Hourly listening distribution and day-vs-hour activity heatmaps.
-    - **Narrative**: Autobiographical insights including milestones (1k, 5k, 10k tracks), longest streaks, and "forgotten favorites."
+- **Interactive Dashboard**: A multi-page Streamlit dashboard with:
+    - **Overview**: Top Artists, Albums, and Tracks plus a unified **Geo Explorer** with four views — 3D Globe (Pydeck), 2D scatter map, US States choropleth, and a paginated artist-city table.
+    - **Music**: Listening timeline, top charts, and AI-powered insights.
+    - **Places**: Check-in Insights from Foursquare/Swarm data.
+    - **Health**: Fitness activity from supported health plugins.
+    - **Culture**: Films & Books and Beer logging.
+- **Cinematic Fly-through**: Record smooth 3D globe videos of your listening locations, with optional US state border highlights when filtered data spans specific states.
 - **Data Exploration**: Includes a Jupyter Notebook for custom data deep-dives.
 - **Secure Handling**: Credentials managed via environment variables.
 
@@ -211,7 +213,7 @@ Generate a cinematic 3D fly-through video or HTML animation of your listening lo
     - Configurable resolution, FPS, and filtering (artist, dates).
 - **Video Generation (.mp4)**:
    ```bash
-   python record_flythrough.py path/to/lastfm_tracks.csv --output my_tour.mp4 --artist "Radiohead" --marker_zoom 7 --fps 30
+   python record_flythrough.py path/to/lastfm_tracks.csv --output my_tour.mp4 --artist "Radiohead" --marker_size 7 --fps 30
    ```
 - **HTML Animation**:
    ```bash
@@ -226,7 +228,8 @@ Generate a cinematic 3D fly-through video or HTML animation of your listening lo
 | `--output` | Output path; `.mp4` for video, `.html` for interactive animation | `flythrough.mp4` |
 | `--artist` | Filter to a single artist name | — |
 | `--start_date` / `--end_date` | Inclusive date range filter (`YYYY-MM-DD`) | — |
-| `--marker_zoom` | Marker size scaling — higher values produce smaller, more precise markers | `3.0` |
+| `--marker_size` | Marker size scaling — higher values produce smaller, more precise markers | `5.5` |
+| `--highlight_states` | Comma-separated US state abbreviations to highlight with polygon borders (e.g. `IL,MD`) | — |
 | `--fps` | Video frame rate | `30` |
 | `--width` / `--height` | Video resolution in pixels | `1920` / `1080` |
 | `--swarm_dir` | Path to Foursquare/Swarm export directory; used to geocode listening data when lat/lng is absent | — |
@@ -250,23 +253,37 @@ Additional utility scripts are available in the `tools/` directory:
 ## Project Structure
 
 ```
-autobiographer.py       # Data-fetching CLI (`list`, `fetch <plugin>`) + Last.fm API client
-visualize.py            # Streamlit dashboard (assembles views from plugins)
-export_html.py          # Static HTML export — single self-contained report file
-analysis_utils.py       # Shared data processing and caching logic
+autobiographer.py           # Data-fetching CLI (`list`, `fetch <plugin>`) + Last.fm API client
+visualize.py                # Streamlit dashboard (assembles views from plugins)
+export_html.py              # Static HTML export — single self-contained report file
+record_flythrough.py        # Cinematic 3D fly-through video generator (MP4 / HTML)
+analysis_utils.py           # Shared data processing and caching logic
 core/
-  broker.py             # DataBroker: loads plugins, merges what-when + where-when
+  broker.py                 # DataBroker: loads plugins, merges what-when + where-when
+pages/
+  geo_explorer.py           # Unified Geo Explorer: 3D Globe, 2D Map, US States, Table
+  music.py                  # Listening timeline and top charts
+  insights.py               # AI-powered listening narrative and milestones
+  places.py                 # Foursquare/Swarm check-in insights
+  fitness.py                # Health & fitness data
+  culture.py                # Films & books
+  beer.py                   # Beer log
+  overview.py               # Top-level summary stats
 plugins/
   sources/
-    base.py             # SourcePlugin ABC + validate_schema()
-    __init__.py         # REGISTRY + @register decorator + load_builtin_plugins()
+    base.py                 # SourcePlugin ABC + validate_schema()
+    __init__.py             # REGISTRY + @register decorator + load_builtin_plugins()
     lastfm/loader.py        # Last.fm source plugin
     swarm/loader.py         # Foursquare/Swarm source plugin
     assumptions/loader.py   # Location assumptions plugin
-notebooks/              # Jupyter notebooks for custom analysis
-tools/                  # Utility scripts (audio muxing, etc.)
-data/                   # Local data storage (CSVs, cache, Swarm JSON exports)
-tests/                  # Pytest suite (80%+ coverage)
+assets/
+  countries.geojson         # Country polygon GeoJSON for 3D globe overlay
+  states.geojson            # US state border LineStrings for 3D globe overlay
+  us-states-polygons.geojson  # US state polygon GeoJSON with abbreviation properties (highlight layer)
+notebooks/                  # Jupyter notebooks for custom analysis
+tools/                      # Utility scripts (audio muxing, etc.)
+data/                       # Local data storage (CSVs, cache, Swarm JSON exports)
+tests/                      # Pytest suite (70%+ coverage)
 ```
 
 ## Plugin Architecture

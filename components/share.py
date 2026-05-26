@@ -23,6 +23,6 @@ def render_share_button(html_bytes: bytes, filename: str) -> None:
             data=html_bytes,
             file_name=filename,
             mime="text/html",
-            use_container_width=True,
+            width="stretch",
             help="Download a self-contained HTML snapshot of this page",
         )

@@ -92,38 +92,41 @@ def _load_data_with_progress(
     """
     assumptions = load_assumptions(assumptions_path)
 
-    with st.status("Loading your data…", expanded=True) as status:
-        st.write("Reading listening history…")
-        raw_df = load_listening_data(file_path)
+    st.markdown("<div style='height:20vh;'></div>", unsafe_allow_html=True)
+    _, center_col, _ = st.columns([1, 2, 1])
+    with center_col:
+        with st.status("Loading your data…", expanded=True) as status:
+            st.write("Reading listening history…")
+            raw_df = load_listening_data(file_path)
 
-        if raw_df is None or raw_df.empty:
-            status.update(label="No listening data found.", state="error", expanded=False)
-            st.session_state["_raw_df"] = None
-            st.session_state["swarm_df"] = None
-            st.session_state["_cache_status"] = "miss"
-            return
+            if raw_df is None or raw_df.empty:
+                status.update(label="No listening data found.", state="error", expanded=False)
+                st.session_state["_raw_df"] = None
+                st.session_state["swarm_df"] = None
+                st.session_state["_cache_status"] = "miss"
+                return
 
-        swarm_df: pd.DataFrame
-        if swarm_dir and os.path.exists(swarm_dir):
-            st.write("Loading location data…")
-            swarm_df = load_swarm_data(swarm_dir)
-        else:
-            swarm_df = pd.DataFrame()
+            swarm_df: pd.DataFrame
+            if swarm_dir and os.path.exists(swarm_dir):
+                st.write("Loading location data…")
+                swarm_df = load_swarm_data(swarm_dir)
+            else:
+                swarm_df = pd.DataFrame()
 
-        cache_key = get_cache_key(file_path, swarm_dir, assumptions_path)
-        cached = get_cached_data(cache_key)
+            cache_key = get_cache_key(file_path, swarm_dir, assumptions_path)
+            cached = get_cached_data(cache_key)
 
-        if cached is not None:
-            merged_df = cached
-            st.session_state["_cache_status"] = "hit"
-            st.write("Restored from cache.")
-        else:
-            st.session_state["_cache_status"] = "miss"
-            st.write("Applying timezone offsets — first-time setup, may take a minute…")
-            merged_df = apply_swarm_offsets(raw_df, swarm_df, assumptions)
-            save_to_cache(merged_df, cache_key)
+            if cached is not None:
+                merged_df = cached
+                st.session_state["_cache_status"] = "hit"
+                st.write("Restored from cache.")
+            else:
+                st.session_state["_cache_status"] = "miss"
+                st.write("Applying timezone offsets — first-time setup, may take a minute…")
+                merged_df = apply_swarm_offsets(raw_df, swarm_df, assumptions)
+                save_to_cache(merged_df, cache_key)
 
-        status.update(label="Data ready.", state="complete", expanded=False)
+            status.update(label="Data ready.", state="complete", expanded=False)
 
     st.session_state["_raw_df"] = merged_df
     st.session_state["swarm_df"] = swarm_df if not swarm_df.empty else None

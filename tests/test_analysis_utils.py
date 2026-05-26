@@ -263,5 +263,233 @@ class TestAnalysisUtils(unittest.TestCase):
         self.assertEqual(result.iloc[0]["city"], "Reykjavik")
 
 
+class TestSwarmAnalysisCaches(unittest.TestCase):
+    """Tests for transit-days, dining, and detected-trips cache persistence."""
+
+    def test_transit_days_roundtrip(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_transit_days_cache, save_transit_days_cache
+
+        days = {"2024-01-01", "2024-06-15", "2024-12-25"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "transit.json")
+            save_transit_days_cache(days, path)
+            loaded = load_transit_days_cache(path)
+        self.assertEqual(loaded, days)
+
+    def test_transit_days_missing_file_returns_empty_set(self) -> None:
+        from analysis_utils import load_transit_days_cache
+
+        result = load_transit_days_cache("/nonexistent/path.json")
+        self.assertEqual(result, set())
+
+    def test_transit_days_invalid_json_returns_empty_set(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_transit_days_cache
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as fh:
+            fh.write("not json[{")
+            path = fh.name
+        result = load_transit_days_cache(path)
+        os.unlink(path)
+        self.assertEqual(result, set())
+
+    def test_dining_cache_roundtrip(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_dining_cache, save_dining_cache
+
+        artists_df = pd.DataFrame({"artist": ["Artist A", "Artist B"], "Plays": [10, 5]})
+        albums_df = pd.DataFrame({"album": ["Album X"], "Plays": [3]})
+        data = {
+            "Restaurants": {
+                "top_artists": artists_df,
+                "top_albums": albums_df,
+                "checkin_count": 4,
+                "listen_count": 15,
+                "peak_hour": 19,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "dining.json")
+            save_dining_cache(data, path)
+            loaded = load_dining_cache(path)
+
+        self.assertIn("Restaurants", loaded)
+        self.assertEqual(loaded["Restaurants"]["checkin_count"], 4)
+        self.assertEqual(loaded["Restaurants"]["listen_count"], 15)
+        self.assertEqual(loaded["Restaurants"]["peak_hour"], 19)
+        self.assertEqual(
+            list(loaded["Restaurants"]["top_artists"]["artist"]), ["Artist A", "Artist B"]
+        )
+
+    def test_dining_cache_missing_file_returns_empty(self) -> None:
+        from analysis_utils import load_dining_cache
+
+        self.assertEqual(load_dining_cache("/nonexistent/path.json"), {})
+
+    def test_dining_cache_peak_hour_none_roundtrips(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_dining_cache, save_dining_cache
+
+        data = {
+            "Cafes": {
+                "top_artists": pd.DataFrame(),
+                "top_albums": pd.DataFrame(),
+                "checkin_count": 1,
+                "listen_count": 0,
+                "peak_hour": None,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "dining.json")
+            save_dining_cache(data, path)
+            loaded = load_dining_cache(path)
+        self.assertIsNone(loaded["Cafes"]["peak_hour"])
+
+
+class TestGetTransitDays(unittest.TestCase):
+    """Tests for get_transit_days."""
+
+    def test_returns_dates_with_airport_checkin(self) -> None:
+        from analysis_utils import get_transit_days
+
+        swarm = pd.DataFrame(
+            {"venue_category": ["Airport", "Coffee Shop"], "timestamp": [1700000000, 1700003600]}
+        )
+        days = get_transit_days(swarm)
+        self.assertEqual(len(days), 1)
+
+    def test_empty_swarm_returns_empty_set(self) -> None:
+        from analysis_utils import get_transit_days
+
+        self.assertEqual(get_transit_days(pd.DataFrame()), set())
+
+    def test_no_transit_category_returns_empty(self) -> None:
+        from analysis_utils import get_transit_days
+
+        swarm = pd.DataFrame({"venue_category": ["Museum", "Park"], "timestamp": [1, 2]})
+        self.assertEqual(get_transit_days(swarm), set())
+
+    def test_case_insensitive_matching(self) -> None:
+        from analysis_utils import get_transit_days
+
+        swarm = pd.DataFrame({"venue_category": ["airport"], "timestamp": [1700000000]})
+        self.assertEqual(len(get_transit_days(swarm)), 1)
+
+
+class TestSplitTransitListens(unittest.TestCase):
+    """Tests for split_transit_listens."""
+
+    def _make_df(self, days: list[str]) -> pd.DataFrame:
+        ts = [1700000000 + i * 86400 for i in range(len(days))]
+        return pd.DataFrame(
+            {
+                "date_text": pd.to_datetime(days),
+                "timestamp": ts,
+                "artist": ["A"] * len(days),
+            }
+        )
+
+    def test_partitions_into_two_sets(self) -> None:
+        from analysis_utils import split_transit_listens
+
+        df = self._make_df(["2024-01-01", "2024-01-02"])
+        transit, non = split_transit_listens(df, {"2024-01-01"})
+        self.assertEqual(len(transit), 1)
+        self.assertEqual(len(non), 1)
+
+    def test_empty_transit_days_yields_all_non_transit(self) -> None:
+        from analysis_utils import split_transit_listens
+
+        df = self._make_df(["2024-01-01", "2024-01-02"])
+        transit, non = split_transit_listens(df, set())
+        self.assertEqual(len(transit), 0)
+        self.assertEqual(len(non), 2)
+
+    def test_empty_df_returns_two_empty_dfs(self) -> None:
+        from analysis_utils import split_transit_listens
+
+        transit, non = split_transit_listens(pd.DataFrame(), {"2024-01-01"})
+        self.assertTrue(transit.empty)
+        self.assertTrue(non.empty)
+
+
+class TestClassifyVenueCategory(unittest.TestCase):
+    """Tests for _classify_venue_category."""
+
+    def test_restaurant_maps_correctly(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertEqual(_classify_venue_category("Italian Restaurant"), "Restaurants")
+
+    def test_bar_maps_correctly(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertEqual(_classify_venue_category("Dive Bar"), "Bars & Nightlife")
+
+    def test_cafe_maps_correctly(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertEqual(_classify_venue_category("Coffee Shop"), "Cafes")
+
+    def test_fast_food_maps_correctly(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertEqual(_classify_venue_category("Burger Joint"), "Fast Food")
+
+    def test_unknown_category_returns_none(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertIsNone(_classify_venue_category("Museum"))
+
+    def test_empty_string_returns_none(self) -> None:
+        from analysis_utils import _classify_venue_category
+
+        self.assertIsNone(_classify_venue_category(""))
+
+
+class TestGetDiningSoundtrackData(unittest.TestCase):
+    """Tests for get_dining_soundtrack_data."""
+
+    def test_returns_dict_with_bucket_keys(self) -> None:
+        from analysis_utils import get_dining_soundtrack_data
+
+        base_ts = 1700000000
+        swarm = pd.DataFrame({"venue_category": ["Italian Restaurant"], "timestamp": [base_ts]})
+        listens = pd.DataFrame(
+            {
+                "timestamp": [base_ts - 1800, base_ts, base_ts + 1800],
+                "artist": ["Artist A", "Artist A", "Artist B"],
+                "date_text": pd.to_datetime(
+                    ["2023-11-14 10:00", "2023-11-14 11:00", "2023-11-14 12:00"]
+                ),
+            }
+        )
+        result = get_dining_soundtrack_data(swarm, listens)
+        self.assertIn("Restaurants", result)
+
+    def test_empty_inputs_return_empty_dict(self) -> None:
+        from analysis_utils import get_dining_soundtrack_data
+
+        self.assertEqual(get_dining_soundtrack_data(pd.DataFrame(), pd.DataFrame()), {})
+
+    def test_missing_required_columns_returns_empty(self) -> None:
+        from analysis_utils import get_dining_soundtrack_data
+
+        bad_swarm = pd.DataFrame({"venue": ["Italian Restaurant"]})
+        listens = pd.DataFrame(
+            {
+                "timestamp": [1700000000],
+                "artist": ["A"],
+                "date_text": pd.to_datetime(["2023-01-01"]),
+            }
+        )
+        self.assertEqual(get_dining_soundtrack_data(bad_swarm, listens), {})
+
+
 if __name__ == "__main__":
     unittest.main()

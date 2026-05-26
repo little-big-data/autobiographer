@@ -23,6 +23,24 @@
       "lat": 61.2181,
       "lng": -149.9003,
       "timezone": "US/Alaska"
+    },
+    {
+      "name": "Halloween",
+      "month": 10,
+      "day_range": [1, 31],
+      "city": "Your City",
+      "lat": 0.0,
+      "lng": 0.0,
+      "timezone": "America/Chicago"
+    },
+    {
+      "name": "Thanksgiving",
+      "month": 11,
+      "day_range": [1, 30],
+      "city": "Your City",
+      "lat": 0.0,
+      "lng": 0.0,
+      "timezone": "America/Chicago"
     }
   ],
   "trips": [

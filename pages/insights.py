@@ -34,8 +34,8 @@ def render_insights_and_narrative(df: DataFrame) -> None:
 
     years = ["All"] + sorted(df["date_text"].dt.year.unique().astype(str).tolist(), reverse=True)
     months = ["All"] + list(range(1, 13))
-    countries = ["All"] + sorted(df["country"].unique().tolist())
-    states = ["All"] + sorted(df["state"].unique().tolist())
+    countries = ["All"] + sorted(df["country"].dropna().unique().tolist())
+    states = ["All"] + sorted(df["state"].dropna().unique().tolist())
 
     col_filter1, col_filter2, col_filter3, col_filter4 = st.columns(4)
     with col_filter1:

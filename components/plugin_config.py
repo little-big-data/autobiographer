@@ -27,17 +27,22 @@ settings = LocalSettings()
 def load_config_into_session_state() -> None:
     """Hydrate session state from local_settings.json.
 
-    Called on every page render. Only sets keys that are absent from session
-    state, so in-session widget edits are never overwritten. Running on every
-    render ensures config values are restored from disk when Streamlit clears
-    widget-bound session state keys during page navigation.
+    Called on every page render. Sets keys that are absent from session state,
+    and also restores keys that are present as empty string when the disk value
+    is non-empty.  The empty-string case happens when Streamlit resets a
+    widget-bound key after an in-handler st.rerun() call — restoring from disk
+    prevents the sidebar from treating the path as unconfigured and reloading
+    data without swarm context.
     """
     for plugin_id, plugin_cfg in settings.get_all_plugin_configs().items():
         for field_key, value in plugin_cfg.items():
             if not isinstance(value, str):
                 continue
             session_key = f"{plugin_id}_{field_key}"
-            if session_key not in st.session_state:
+            current = st.session_state.get(session_key)
+            # Set if absent; also restore from disk when session has empty
+            # string but disk has a non-empty value (widget reset after rerun).
+            if current is None or (isinstance(current, str) and not current and value):
                 st.session_state[session_key] = value
 
 
