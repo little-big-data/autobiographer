@@ -23,6 +23,7 @@ from pages.city_soundtracks import render_city_soundtracks
 from pages.culture import render_culture
 from pages.data_sources import render_data_sources, render_plugin_page
 from pages.deep_music import render_deep_music
+from pages.discovery_zones import render_discovery_zones
 from pages.fitness import render_fitness
 from pages.geo_explorer import render_geo_explorer
 from pages.insights import render_insights, render_insights_and_narrative  # noqa: F401
@@ -130,6 +131,7 @@ def main() -> None:
             "Music": [
                 st.Page(render_music, title="Listening", icon=":material/headphones:"),
                 st.Page(render_insights, title="Insights", icon=":material/auto_stories:"),
+                st.Page(render_discovery_zones, title="Discovery Zones", icon=":material/explore:"),
                 st.Page(
                     render_life_in_chapters,
                     title="Life in Chapters",

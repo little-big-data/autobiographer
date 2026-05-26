@@ -8,13 +8,15 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 
-ruptures: Optional[Any]
-try:
-    import ruptures as _ruptures_imported
 
-    ruptures = _ruptures_imported
-except ImportError:
-    ruptures = None
+def _get_ruptures() -> Optional[Any]:
+    """Lazily import ruptures (pulls in scipy) only when changepoint detection runs."""
+    try:
+        import ruptures as _r
+
+        return _r
+    except (ImportError, Exception):
+        return None
 
 
 def get_cache_key(
@@ -972,6 +974,36 @@ def get_genre_weekly(df: pd.DataFrame, n: int = 8) -> pd.DataFrame:
     subset["date"] = subset["date_text"].dt.to_period("W").dt.start_time
     weekly = subset.groupby(["date", "artist"]).size().reset_index(name="scrobbles")
     return weekly.rename(columns={"artist": "genre"})
+
+
+def get_first_plays(df: pd.DataFrame) -> pd.DataFrame:
+    """Return the first play row for each artist, sorted chronologically.
+
+    For each artist, finds the earliest scrobble — representing the moment
+    that artist was "discovered."  The returned DataFrame retains all columns
+    from the input so callers can join city/location context when available.
+
+    Args:
+        df: Listening history DataFrame with at minimum ``artist`` and
+            ``timestamp`` columns.  A ``date_text`` column is expected for
+            display purposes.
+
+    Returns:
+        DataFrame of first-play rows, one per artist, sorted by ``timestamp``
+        ascending.  Empty DataFrame if input is empty or missing required
+        columns.
+    """
+    required = {"artist", "timestamp"}
+    if df.empty or not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    return (
+        df.sort_values("timestamp")
+        .groupby("artist", as_index=False)
+        .first()
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
 
 
 def detect_trip_periods(
@@ -3694,6 +3726,7 @@ def detect_listening_changepoints(
         List of ``pd.Timestamp`` changepoint dates, or ``[]`` if ruptures is
         unavailable, the DataFrame is empty, or segmentation fails.
     """
+    ruptures = _get_ruptures()
     if ruptures is None:
         return []
 
