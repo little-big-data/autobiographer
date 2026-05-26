@@ -140,6 +140,8 @@ def load_swarm_data(swarm_dir: str) -> pd.DataFrame:
                 "venue_category",
                 "lat",
                 "lng",
+                "event_category",
+                "shout",
             ]
         )
 
@@ -188,6 +190,10 @@ def load_swarm_data(swarm_dir: str) -> pd.DataFrame:
                     categories = venue.get("categories", [])
                     venue_category = categories[0].get("name", "") if categories else ""
 
+                    event_cats = item.get("event", {}).get("categories", [])
+                    event_category = event_cats[0].get("name", "") if event_cats else ""
+                    shout = item.get("shout", "") or ""
+
                     all_checkins.append(
                         {
                             "timestamp": ts,
@@ -200,6 +206,8 @@ def load_swarm_data(swarm_dir: str) -> pd.DataFrame:
                             "lat": lat,
                             "lng": lng,
                             "_needs_geocode": needs_geocode and lat is not None and lng is not None,
+                            "event_category": event_category,
+                            "shout": shout,
                         }
                     )
         except Exception as e:
@@ -217,6 +225,8 @@ def load_swarm_data(swarm_dir: str) -> pd.DataFrame:
                 "venue_category",
                 "lat",
                 "lng",
+                "event_category",
+                "shout",
             ]
         )
 
@@ -3542,6 +3552,81 @@ def get_music_around_venue_type(
         "checkin_count": checkin_count,
         "listen_count": listen_count,
     }
+
+
+def get_music_around_events(
+    swarm_df: pd.DataFrame,
+    lastfm_df: pd.DataFrame,
+    window_hours: float = 2.0,
+    top_n: int = 20,
+) -> dict[str, pd.DataFrame]:
+    """Find Last.fm plays near event check-ins grouped by event type.
+
+    Matches ``event_category`` (case-insensitive substring) against three
+    keyword buckets — Concert, Movie, Sports — then aggregates top artists
+    within ``window_hours`` of each matching check-in.
+
+    Args:
+        swarm_df: Swarm DataFrame with ``timestamp`` and ``event_category``.
+        lastfm_df: Listening history with ``timestamp`` and ``artist``.
+        window_hours: Symmetric window in hours around each check-in.
+        top_n: Maximum rows to return per bucket.
+
+    Returns:
+        Dict with keys ``"Concert"``, ``"Movie"``, ``"Sports"`` each mapping
+        to a DataFrame with columns ``["artist", "plays"]`` sorted descending.
+    """
+    _empty_df = pd.DataFrame(columns=["artist", "plays"])
+    result: dict[str, pd.DataFrame] = {
+        "Concert": _empty_df.copy(),
+        "Movie": _empty_df.copy(),
+        "Sports": _empty_df.copy(),
+    }
+
+    if "event_category" not in swarm_df.columns or swarm_df.empty:
+        return result
+
+    window_minutes = int(window_hours * 60)
+
+    buckets: dict[str, list[str]] = {
+        "Concert": ["concert"],
+        "Movie": ["movie"],
+        "Sports": ["sport", "game"],
+    }
+
+    for bucket, keywords in buckets.items():
+        _kws = keywords
+        mask = swarm_df["event_category"].apply(
+            lambda cat, _k=_kws: any(kw in str(cat).lower() for kw in _k)
+        )
+        matching = swarm_df[mask]
+        if matching.empty:
+            continue
+
+        frames: list[pd.DataFrame] = []
+        for _, row in matching.iterrows():
+            nearby = _listens_around_checkin(lastfm_df, int(row["timestamp"]), window_minutes)
+            if not nearby.empty:
+                frames.append(nearby)
+
+        if not frames:
+            continue
+
+        combined = pd.concat(frames, ignore_index=True)
+        if "artist" not in combined.columns:
+            continue
+
+        artist_counts = (
+            combined.groupby("artist", sort=False)
+            .size()
+            .reset_index(name="plays")
+            .sort_values("plays", ascending=False)
+            .head(top_n)
+            .reset_index(drop=True)
+        )
+        result[bucket] = artist_counts
+
+    return result
 
 
 def get_city_artist_affinity_matrix(

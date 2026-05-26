@@ -782,22 +782,7 @@ def _render_deep_analysis_compute(broker: Any) -> None:
                     elif _key == "venue_patterns":
                         swarm_df = st.session_state.get("swarm_df")
                         if swarm_df is not None and not swarm_df.empty:
-                            loyalty = analysis_utils.get_venue_loyalty_scores(swarm_df)
-                            routine = analysis_utils.get_routine_venues(swarm_df)
-                            exploration = analysis_utils.get_venue_exploration_rate(swarm_df)
-                            music_cafe = analysis_utils.get_music_around_venue_type(
-                                swarm_df, df, ["cafe", "coffee"]
-                            )
-                            analysis_utils.save_deep_venue_patterns_cache(
-                                {
-                                    "loyalty": loyalty.to_dict(orient="records"),
-                                    "routine": routine.to_dict(orient="records"),
-                                    "exploration": exploration.to_dict(orient="records"),
-                                    "music_around_cafes": music_cafe["top_artists"].to_dict(
-                                        orient="records"
-                                    ),
-                                }
-                            )
+                            _compute_venue_patterns(swarm_df, df)
                         else:
                             analysis_utils.save_deep_venue_patterns_cache({"no_swarm_data": True})
                     elif _key == "life_events":
@@ -836,6 +821,57 @@ def _render_deep_analysis_compute(broker: Any) -> None:
             if os.path.exists(path):
                 os.remove(path)
         st.rerun()
+
+
+def _compute_venue_patterns(swarm_df: pd.DataFrame, lastfm_df: pd.DataFrame) -> None:
+    """Compute and save the deep venue-patterns cache.
+
+    Extracts loyalty, routine, exploration, music-around-venues (cafes and
+    events), and recent shouts from ``swarm_df`` and ``lastfm_df``, then
+    persists them via :func:`analysis_utils.save_deep_venue_patterns_cache`.
+
+    Args:
+        swarm_df: Swarm check-in DataFrame.
+        lastfm_df: Last.fm listening history DataFrame.
+    """
+    loyalty = analysis_utils.get_venue_loyalty_scores(swarm_df)
+    routine = analysis_utils.get_routine_venues(swarm_df)
+    exploration = analysis_utils.get_venue_exploration_rate(swarm_df)
+    music_cafe = analysis_utils.get_music_around_venue_type(swarm_df, lastfm_df, ["cafe", "coffee"])
+    music_events = analysis_utils.get_music_around_events(swarm_df, lastfm_df)
+
+    if "shout" in swarm_df.columns:
+        shouts_df = (
+            swarm_df[swarm_df["shout"].str.strip() != ""][["timestamp", "venue", "shout"]]
+            .sort_values("timestamp", ascending=False)
+            .head(20)
+            .copy()
+        )
+        shouts_df["date"] = pd.to_datetime(shouts_df["timestamp"], unit="s", utc=True).dt.strftime(
+            "%Y-%m-%d"
+        )
+        recent_shouts = shouts_df[["venue", "shout", "date"]].to_dict(orient="records")
+    else:
+        recent_shouts = []
+
+    analysis_utils.save_deep_venue_patterns_cache(
+        {
+            "loyalty": loyalty.to_dict(orient="records"),
+            "routine": routine.to_dict(orient="records"),
+            "exploration": exploration.to_dict(orient="records"),
+            "music_around_cafes": music_cafe["top_artists"].to_dict(orient="records"),
+            "music_around_concerts": music_events.get("Concert", pd.DataFrame()).to_dict(
+                orient="records"
+            ),
+            "music_around_movies": music_events.get("Movie", pd.DataFrame()).to_dict(
+                orient="records"
+            ),
+            "music_around_sports": music_events.get("Sports", pd.DataFrame()).to_dict(
+                orient="records"
+            ),
+            "recent_shouts": recent_shouts,
+        }
+    )
 
 
 def render_data_sources() -> None:

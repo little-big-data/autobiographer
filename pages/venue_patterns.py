@@ -66,6 +66,34 @@ def render_venue_patterns() -> None:
         else pd.DataFrame(columns=["artist", "plays"])
     )
 
+    concerts_records = cache.get("music_around_concerts", [])
+    music_around_concerts = (
+        pd.DataFrame(concerts_records)
+        if concerts_records
+        else pd.DataFrame(columns=["artist", "plays"])
+    )
+
+    movies_records = cache.get("music_around_movies", [])
+    music_around_movies = (
+        pd.DataFrame(movies_records)
+        if movies_records
+        else pd.DataFrame(columns=["artist", "plays"])
+    )
+
+    sports_records = cache.get("music_around_sports", [])
+    music_around_sports = (
+        pd.DataFrame(sports_records)
+        if sports_records
+        else pd.DataFrame(columns=["artist", "plays"])
+    )
+
+    shouts_records = cache.get("recent_shouts", [])
+    recent_shouts = (
+        pd.DataFrame(shouts_records)
+        if shouts_records
+        else pd.DataFrame(columns=["venue", "shout", "date"])
+    )
+
     tabs = st.tabs(["Loyalty", "Routines", "Exploration", "Music & Venues"])
 
     # -----------------------------------------------------------------------
@@ -115,3 +143,27 @@ def render_venue_patterns() -> None:
             st.info("No music-around-venue data available. Run Calculate All Deep Analyses first.")
         else:
             st.dataframe(music_around_cafes, width="stretch")
+
+        st.subheader("Music Around Concerts")
+        if music_around_concerts.empty:
+            st.info("No concert music data available.")
+        else:
+            st.dataframe(music_around_concerts, width="stretch")
+
+        st.subheader("Music Around Movies")
+        if music_around_movies.empty:
+            st.info("No movie music data available.")
+        else:
+            st.dataframe(music_around_movies, width="stretch")
+
+        st.subheader("Music Around Sports Events")
+        if music_around_sports.empty:
+            st.info("No sports music data available.")
+        else:
+            st.dataframe(music_around_sports, width="stretch")
+
+        st.subheader("Recent Event Shouts")
+        if recent_shouts.empty:
+            st.info("No recent event shouts available.")
+        else:
+            st.dataframe(recent_shouts, width="stretch")
