@@ -16,7 +16,7 @@ The migration is phased. Subtasks 1–5 build the full localizer package without
 Plan Review: APPROVED — 7-subtask extraction of autobiographer's data layer into a standalone `localizer` package, progressing from scaffold through DuckDB store, plugin migration, broker bridge, CLI, new fetchers, and full cutover; all dependencies are correctly ordered, criteria are verifiable, and edge cases are well-specified.
 
 ## Current Subtask
-current: 3
+current: 5
 
 ---
 
@@ -188,7 +188,7 @@ Owner Review: APPROVED (all issues resolved)
 
 ### Subtask 3 — Port fetch_utils.py and Last.fm plugin
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: localizer-migrate-plugins
 
@@ -223,19 +223,20 @@ Move `core/fetch_utils.py` verbatim into `localizer` and migrate the Last.fm fet
 - **Existing test pass-through**: run `pytest tests/test_autobiographer.py tests/test_fetch_utils.py` — both must pass without modifying those files.
 
 **Test Files**:
-(filled by tester agent)
+- `packages/localizer/tests/test_lastfm_plugin.py` — 22 tests covering normalized dict shape, timeout retries, connection errors, HTTP 403, empty response, now-playing skip, backwards-compat shim identity
 
 **Implementation Notes**:
-(filled by coder agent)
+Moved HTTP logic from `autobiographer.py` into `LastFmFetcher`; `Autobiographer` class becomes thin shim delegating `_fetch_page()` to the fetcher. `core/fetch_utils.py` becomes a re-export from `localizer.fetch_utils`. `LastFmPlugin` registered via `@register` decorator; `load_builtin_plugins()` updated to explicitly re-register both plugins (safe after `REGISTRY.clear()`). All 22 tests pass; ruff and mypy clean.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED
+Owner Review: APPROVED — Last.fm plugin correctly extracted; shim delegation verified; 22 tests cover all test guidance cases; backwards-compat shim resolves to same class object.
 
 ---
 
 ### Subtask 4 — Port Swarm plugin and implement LocalizerBroker
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: localizer-migrate-plugins
 
@@ -267,13 +268,15 @@ Migrate the Swarm plugin into localizer as a `FetchMode.MANUAL` / `OutputTable.P
 - **Sidebar toggle**: mock `LocalizerStore.default_path().exists()` returning `False` and assert `DataBroker` is selected; mock returning `True` and assert `LocalizerBroker` is selected.
 
 **Test Files**:
-(filled by tester agent)
+- `packages/localizer/tests/test_swarm_plugin.py` — 18 tests covering PLUGIN_ID, registration, FetchMode/OutputTable values, fetch_records normalization, JSON format variants, missing/empty dir handling, manual download instructions
+- `tests/test_localizer_broker.py` — 20 tests covering ASOF join correctness, column parity with DataBroker, empty store, events-only (no places), resource cleanup (Windows file-lock safety), sidebar toggle
 
 **Implementation Notes**:
-(filled by coder agent)
+`SwarmPlugin` parses both Swarm JSON export formats (`{"items":[...]}` and `{"checkins":{"items":[...]}}`). `LocalizerBroker` opens/closes DuckDB per public method call to avoid Windows file-lock issues. `_make_broker()` factory in `components/sidebar.py` selects `LocalizerBroker` when store exists. `pd.merge_asof(direction="backward")` used for temporal join. All 20 broker tests and 18 swarm tests pass; ruff and mypy clean.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED
+Owner Review: APPROVED — Swarm plugin handles both JSON formats; LocalizerBroker correctly implements temporal join with per-call connection management; sidebar toggle properly falls back to DataBroker; 38 new tests all pass; column parity with DataBroker verified.
 
 ---
 

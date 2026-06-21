@@ -38,9 +38,13 @@ def register(cls: type[SourcePlugin]) -> type[SourcePlugin]:
 
 
 def load_builtin_plugins() -> None:
-    """Import built-in plugins so they self-register via @register.
+    """Ensure all built-in plugins are present in REGISTRY.
 
-    Call this once at application startup before reading REGISTRY.
-    Actual plugin imports are added in later subtasks (3+).
+    Safe to call multiple times and after REGISTRY.clear() — always
+    re-registers, because @register only fires on first module import.
     """
-    pass
+    from localizer.plugins.lastfm.loader import LastFmPlugin
+    from localizer.plugins.swarm.loader import SwarmPlugin
+
+    REGISTRY[LastFmPlugin.PLUGIN_ID] = LastFmPlugin
+    REGISTRY[SwarmPlugin.PLUGIN_ID] = SwarmPlugin

@@ -46,6 +46,31 @@ from plugins.sources import REGISTRY, load_builtin_plugins
 _DEFAULT_ASSUMPTIONS = "default_assumptions.json"
 
 
+def _make_broker() -> object:
+    """Return the appropriate broker based on whether the DuckDB store exists.
+
+    Returns ``LocalizerBroker`` when the DuckDB file is present (opt-in path);
+    falls back to ``DataBroker`` otherwise so behaviour is unchanged.
+
+    Returns:
+        A broker instance exposing ``get_merged_frame()``, ``get_frame()``,
+        ``is_type_available()``, and ``available_types``.
+    """
+    try:
+        from localizer.store.db import LocalizerStore  # noqa: PLC0415
+
+        if LocalizerStore.default_path().exists():
+            from core.broker import LocalizerBroker  # noqa: PLC0415
+
+            return LocalizerBroker()
+    except ImportError:
+        pass
+
+    from core.broker import DataBroker  # noqa: PLC0415
+
+    return DataBroker()
+
+
 def invalidate_data_cache() -> None:
     """Drop the in-session data cache so the next sidebar render reloads from disk.
 
