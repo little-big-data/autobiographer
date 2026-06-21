@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-localizer = "localizer.cli:main"
+localizer = "localizer.cli:cli"
 
 [build-system]
 requires = ["setuptools>=68"]

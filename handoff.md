@@ -16,7 +16,7 @@ The migration is phased. Subtasks 1–5 build the full localizer package without
 Plan Review: APPROVED — 7-subtask extraction of autobiographer's data layer into a standalone `localizer` package, progressing from scaffold through DuckDB store, plugin migration, broker bridge, CLI, new fetchers, and full cutover; all dependencies are correctly ordered, criteria are verifiable, and edge cases are well-specified.
 
 ## Current Subtask
-current: 5
+current: 6
 
 ---
 
@@ -282,7 +282,7 @@ Owner Review: APPROVED — Swarm plugin handles both JSON formats; LocalizerBrok
 
 ### Subtask 5 — CLI implementation
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: localizer-cli
 
@@ -315,13 +315,23 @@ Implement the `localizer` CLI entry point using `click`. Cover all commands from
 - **`localizer sync --dry-run`**: mock both `LastFmPlugin.fetch_records()` and `SwarmPlugin.fetch_records()`; assert neither writes to the store.
 
 **Test Files**:
-(filled by tester agent)
+- `packages/localizer/tests/test_cli.py` — `test_help_exits_zero`, `test_sources_lists_lastfm`, `test_sources_lists_swarm`, `test_sources_shows_api_mode`, `test_sources_shows_manual_mode`, `test_status_shows_record_counts`, `test_status_json_is_valid`, `test_export_parquet_creates_file`, `test_db_path_prints_store_path`, `test_fetch_nonexistent_source_exits_nonzero`, `test_config_set_and_show`, `test_sync_dry_run_does_not_write`, `test_fetch_dry_run_does_not_write`
+- `packages/localizer/tests/test_settings.py` — `test_get_store_path_returns_path_object`, `test_get_store_path_default_ends_with_store_duckdb`, `test_localizer_db_path_env_override`, `test_get_setting_returns_none_for_unknown_key`, `test_set_and_get_setting_roundtrip`
 
 **Implementation Notes**:
-(filled by coder agent)
+Created two new files and updated one existing file:
+
+- `packages/localizer/src/localizer/settings.py` — `LocalizerSettings` class with `get_store_path()` (reads `LOCALIZER_DB_PATH` env var, falls back to `~/.localizer/store.duckdb`), `get_setting(key, default=None)` (reads from TOML config file), and `set_setting(key, value)` (writes back to TOML). Config path is injectable via constructor arg or `LOCALIZER_CONFIG_PATH` env var (used by CLI tests). Uses `tomllib` (stdlib on Python 3.11+) for reading; falls back to a minimal line-by-line TOML parser if unavailable. Writes using a simple `key = "value"` format.
+
+- `packages/localizer/src/localizer/cli.py` — `click`-based CLI with `cli` as the root group. Commands implemented: `sources` (lists REGISTRY plugins with FetchMode/OutputTable), `status [source] [--json]` (shows event/place/content counts; JSON mode returns per-source record_count breakdown), `export --format --table --output` (exports to parquet/csv/json files), `fetch <source> [--since] [--full] [--dry-run]` (fetches from plugin and upserts to store; dry-run counts records without writing), `sync [--since] [--dry-run]` (iterates all REGISTRY plugins), `db path|vacuum|migrate|shell`, `config show|set <key> <value>`. Unknown sources exit non-zero with a clean human-readable error (no traceback). Store path injected via `LOCALIZER_DB_PATH` env var throughout.
+
+- `packages/localizer/pyproject.toml` — updated `[project.scripts]` entry point from `localizer.cli:main` to `localizer.cli:cli`.
+
+All 875 tests pass (857 pre-existing + 18 new Subtask 5 tests). Coverage 76.38% (threshold 70%). `ruff check`, `ruff format --check`, and `mypy` all exit 0.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — checks clean
+Owner Review: APPROVED — CLI and settings are correct, complete, and appropriately simple. All 13 CLI tests and 5 settings tests pass (18/18). All 875 suite tests pass at 76.38% coverage. Every Test Guidance item has a corresponding test. `--dry-run` correctly skips DuckDB writes in both `fetch` and `sync`. Unknown source exits non-zero with a clean error message. `LOCALIZER_DB_PATH` consistently drives store path across all commands.
 
 ---
 
