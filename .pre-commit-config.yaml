@@ -38,7 +38,7 @@ repos:
         stages: [pre-push]
       - id: pytest-push
         name: pytest (pre-push)
-        entry: pytest
+        entry: venv/Scripts/python.exe -m pytest
         language: system
         pass_filenames: false
         stages: [pre-push]
