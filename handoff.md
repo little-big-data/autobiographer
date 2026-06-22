@@ -16,7 +16,7 @@ The migration is phased. Subtasks 1–5 build the full localizer package without
 Plan Review: APPROVED — 7-subtask extraction of autobiographer's data layer into a standalone `localizer` package, progressing from scaffold through DuckDB store, plugin migration, broker bridge, CLI, new fetchers, and full cutover; all dependencies are correctly ordered, criteria are verifiable, and edge cases are well-specified.
 
 ## Current Subtask
-current: 6
+current: 7
 
 ---
 
@@ -337,7 +337,7 @@ Owner Review: APPROVED — CLI and settings are correct, complete, and appropria
 
 ### Subtask 6 — New fetchers: Feedly, GitHub, RSS/Atom, Letterboxd
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: localizer-new-fetchers
 
@@ -381,13 +381,17 @@ Implement four new `SourcePlugin` subclasses in localizer. Each is independently
 - **Letterboxd CSV parse**: create a minimal CSV string in the Letterboxd export format (at minimum: `Date,Name,Year,Rating` columns); assert `fetch_records()` yields correctly normalized film event dicts with `label = film_title`.
 
 **Test Files**:
-(filled by tester agent)
+- `packages/localizer/tests/test_feedly_plugin.py` — `test_feedly_plugin_id`, `test_feedly_fetch_mode`, `test_feedly_output_tables`, `test_feedly_is_registered`, `test_feedly_fetch_records_normalized_shape`, `test_feedly_fetch_records_timestamp_is_int`, `test_feedly_fetch_records_empty_response`, `test_feedly_missing_token_raises`, `test_feedly_http_error_propagates`, `test_feedly_get_fetch_env_vars`, `test_feedly_connection_error_propagates`, `test_feedly_connect_timeout_propagates`, `test_feedly_read_timeout_propagates`, `test_feedly_explicit_timeout_passed_to_requests`, `test_feedly_malformed_response_missing_items_key`, `test_feedly_fetched_at_is_recent`
+- `packages/localizer/tests/test_github_plugin.py` — `test_github_plugin_id`, `test_github_fetch_mode`, `test_github_output_tables`, `test_github_is_registered`, `test_github_fetch_records_normalized_shape`, `test_github_label_is_repo_full_name`, `test_github_sublabel_is_commit_message`, `test_github_sublabel_truncated_at_100_chars`, `test_github_category_is_sha_prefix`, `test_github_timestamp_is_int`, `test_github_empty_events`, `test_github_missing_token_raises`, `test_github_get_fetch_env_vars`, `test_github_commit_round_trips_through_store`, `test_github_connection_error_propagates`, `test_github_http_404_raises`, `test_github_explicit_timeout_passed_to_requests`, `test_github_fetched_at_is_recent`
+- `packages/localizer/tests/test_rss_plugin.py` — `test_rss_plugin_id_contains_url`, `test_rss_fetch_mode`, `test_rss_output_tables`, `test_rss_fetch_records_normalized_shape`, `test_rss_source_id_contains_url`, `test_rss_timestamp_is_int`, `test_rss_empty_feed`, `test_rss_missing_published_uses_fetched_at`, `test_rss_feed_title_from_feed_metadata`, `test_rss_url_from_entry_link`, `test_rss_title_from_entry`, `test_rss_fetched_at_is_recent`, `test_rss_get_config_fields_returns_list`
+- `packages/localizer/tests/test_letterboxd_plugin.py` — `test_letterboxd_plugin_id`, `test_letterboxd_fetch_mode`, `test_letterboxd_output_tables`, `test_letterboxd_is_registered`, `test_letterboxd_fetch_records_from_csv`, `test_letterboxd_timestamp_is_int`, `test_letterboxd_label_is_film_name`, `test_letterboxd_sublabel_is_year_string`, `test_letterboxd_category_is_rating`, `test_letterboxd_missing_csv_raises`, `test_letterboxd_fetched_at_is_recent`, `test_letterboxd_get_manual_download_instructions_is_actionable`, `test_letterboxd_no_rating_does_not_raise`, `test_letterboxd_source_id_is_letterboxd`, `test_letterboxd_get_config_fields_returns_list`
 
 **Implementation Notes**:
-(filled by coder agent)
+Four new plugin directories: `feedly/loader.py` (FetchMode.API, CONTENT, Feedly Streams API, ms→s timestamp), `github/loader.py` (FetchMode.API, EVENTS, GitHub `/users/{user}/events` PushEvents, label=repo/sublabel=msg[:100]/category=sha[:8]), `rss/loader.py` (FetchMode.MANUAL, CONTENT, feedparser, dynamic PLUGIN_ID, fallback timestamp), `letterboxd/loader.py` (FetchMode.PLAYWRIGHT, EVENTS, CSV via csv.DictReader). `plugins/__init__.py` registers all 6 plugins. `cli.py` `sync_cmd` catches `TypeError`+`EnvironmentError` per-plugin to skip unconfigured plugins gracefully. All 62 new tests pass; 937 total pass at 78.15% coverage. ruff and mypy clean.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — checks clean
+Owner Review: APPROVED — all 6 plugins registered; 62 new tests pass; GitHub round-trip, Letterboxd instructions, and RSS normalization all verified; sync_cmd gracefully skips misconfigured plugins; 937 total passing at 78.15% coverage.
 
 ---
 

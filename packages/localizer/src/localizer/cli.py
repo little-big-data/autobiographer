@@ -308,7 +308,11 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
     total_written = 0
 
     for plugin_id, plugin_cls in sorted(REGISTRY.items()):
-        plugin = plugin_cls()
+        try:
+            plugin = plugin_cls()
+        except TypeError as exc:
+            click.echo(f"  {plugin_id}: skipped (requires configuration — {exc})", err=True)
+            continue
         output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
 
         # Determine effective since from sync state.
@@ -318,7 +322,11 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
                 state = store.get_sync_state(plugin_id)
                 effective_since = state.get("last_synced_at")
 
-        records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
+        try:
+            records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
+        except OSError as exc:
+            click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
+            continue
         count = len(records)
 
         if dry_run:
