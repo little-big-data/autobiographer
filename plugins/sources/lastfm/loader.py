@@ -1,22 +1,24 @@
 """Last.fm source plugin.
 
-Wraps the existing load_listening_data() function and normalizes the resulting
-DataFrame to the "what-when" schema expected by the DataBroker.
+Normalizes Last.fm listening history to the "what-when" schema expected
+by the DataBroker. Data loading delegates to the core analysis bridge so
+this module contains no direct references to legacy utility functions.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
 
 from plugins.sources import register
-from plugins.sources.base import SourcePlugin, validate_schema
+from plugins.sources.base import _LegacyAutoPlugin, validate_schema
 
 
 @register
-class LastFmPlugin(SourcePlugin):
+class LastFmPlugin(_LegacyAutoPlugin):
     """Load Last.fm listening history from a local CSV file.
 
     The CSV is produced by the built-in fetch pipeline (run
@@ -47,7 +49,7 @@ class LastFmPlugin(SourcePlugin):
     def load(self, config: dict[str, Any]) -> pd.DataFrame:
         """Load Last.fm CSV and return a normalized what-when DataFrame.
 
-        Reads the CSV via load_listening_data(), then adds normalized
+        Reads the CSV via the core analysis bridge, then adds normalized
         schema columns (label, sublabel, category, source_id) mapped from
         the existing artist/track/album columns. Original columns are
         preserved so visualize.py continues to work without changes.
@@ -61,10 +63,10 @@ class LastFmPlugin(SourcePlugin):
         Raises:
             ValueError: If required schema columns cannot be produced.
         """
-        from analysis_utils import load_listening_data
+        from core.analysis_loader import load_lastfm_history  # noqa: PLC0415
 
         data_path: str = config["data_path"]
-        df = load_listening_data(data_path)
+        df = load_lastfm_history(data_path)
 
         if df is None or df.empty:
             return pd.DataFrame()
@@ -80,6 +82,29 @@ class LastFmPlugin(SourcePlugin):
 
         validate_schema(df, self.PLUGIN_TYPE)
         return df
+
+    def fetch_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield normalized event records from the Last.fm API.
+
+        Delegates to the localizer LastFmPlugin when invoked from the new
+        fetch pipeline. For legacy CSV-based workflows use load() instead.
+
+        Args:
+            since: Optional Unix timestamp lower bound.
+            progress_cb: Optional progress callback.
+
+        Yields:
+            Normalized event dicts.
+        """
+        from localizer.plugins.lastfm.loader import (
+            LastFmPlugin as _LocalizerPlugin,  # noqa: PLC0415
+        )
+
+        yield from _LocalizerPlugin().fetch_records(since=since, progress_cb=progress_cb)
 
     def get_fetch_env_vars(self) -> list[dict[str, str]]:
         """Return env vars required to fetch Last.fm data.
@@ -129,7 +154,7 @@ class LastFmPlugin(SourcePlugin):
         Raises:
             OSError: If required env vars are not set.
         """
-        from autobiographer import Autobiographer
+        from autobiographer import Autobiographer  # noqa: PLC0415
 
         missing = [v for v in self.get_fetch_env_vars() if not os.getenv(v["var"])]
         if missing:

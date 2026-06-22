@@ -8,6 +8,7 @@ assign locations and timezone offsets to Last.fm listens.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
@@ -45,6 +46,22 @@ class AssumptionsPlugin(SourcePlugin):
                 "file_types": [("JSON files", "*.json"), ("All files", "*.*")],
             }
         ]
+
+    def fetch_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield nothing — assumptions are a static config source, not fetchable.
+
+        Args:
+            since: Unused.
+            progress_cb: Unused.
+
+        Yields:
+            Nothing.
+        """
+        yield from []
 
     def load(self, config: dict[str, Any]) -> pd.DataFrame:
         """Load the assumptions file and return a flat DataFrame of location periods.
