@@ -119,12 +119,8 @@ def test_sidebar_make_broker_returns_localizer_broker_by_default(
         classmethod(lambda cls: _FakePath(exists=True)),
     )
 
-    # Reload the sidebar module to pick up the monkeypatch (it has module-level imports).
-    import importlib
-
+    # _make_broker() calls LocalizerStore.default_path() at runtime — no reload needed.
     import components.sidebar as sidebar_mod
-
-    importlib.reload(sidebar_mod)
 
     broker = sidebar_mod._make_broker()
     assert isinstance(broker, LocalizerBroker), (
@@ -147,11 +143,7 @@ def test_sidebar_never_returns_databroker_when_store_exists(
         classmethod(lambda cls: _FakePath(exists=True)),
     )
 
-    import importlib
-
     import components.sidebar as sidebar_mod
-
-    importlib.reload(sidebar_mod)
 
     broker = sidebar_mod._make_broker()
     assert not isinstance(broker, DataBroker), (
@@ -261,31 +253,31 @@ def test_no_todo_subtask7_markers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_all_page_modules_importable() -> None:
-    """Every module in pages/ must be importable without ImportError.
+def test_cutover_modules_importable() -> None:
+    """Core modules modified in Subtask 7 must be importable without ImportError.
 
-    This test catches broken re-exports without needing a running Streamlit server.
+    Checks non-Streamlit modules only — importing Streamlit page modules in-process
+    contaminates st.cache_data registries and breaks unrelated page tests downstream.
     """
-    pages_dir = pathlib.Path("pages")
+    modules_to_check = [
+        "plugins.sources.base",
+        "plugins.sources.lastfm.loader",
+        "plugins.sources.swarm.loader",
+        "plugins.sources.assumptions.loader",
+        "core.broker",
+        "core.fetch_utils",
+        "core.analysis_loader",
+    ]
     errors: list[str] = []
-
-    for py_file in sorted(pages_dir.glob("*.py")):
-        module_name = f"pages.{py_file.stem}"
-        if module_name == "pages.__init__":
-            continue
+    for module_name in modules_to_check:
         try:
-            # Force a fresh import each call (pages may have side-effect caches).
             if module_name in sys.modules:
                 del sys.modules[module_name]
             importlib.import_module(module_name)
         except ImportError as exc:
             errors.append(f"  {module_name}: {exc}")
-        except Exception:  # noqa: BLE001
-            # Non-ImportError exceptions (e.g. Streamlit context) are acceptable —
-            # we only care that the module's import graph is intact.
-            pass
 
-    assert not errors, "The following page modules raised ImportError:\n" + "\n".join(errors)
+    assert not errors, "The following cutover modules raised ImportError:\n" + "\n".join(errors)
 
 
 # ---------------------------------------------------------------------------
