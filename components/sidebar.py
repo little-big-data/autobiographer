@@ -95,7 +95,15 @@ def _resolve_configs() -> tuple[str, str, str]:
 
     file_path = configs.get("lastfm", {}).get("data_path", "")
     swarm_dir = configs.get("swarm", {}).get("swarm_dir", "")
-    assumptions_path = configs.get("assumptions", {}).get("assumptions_file", _DEFAULT_ASSUMPTIONS)
+    # Old assumptions plugin takes precedence; fall back to LocalizerSettings.
+    assumptions_path = configs.get("assumptions", {}).get("assumptions_file", "")
+    if not assumptions_path:
+        try:
+            from localizer.settings import LocalizerSettings  # noqa: PLC0415
+
+            assumptions_path = LocalizerSettings().get_assumptions_path()
+        except ImportError:
+            assumptions_path = _DEFAULT_ASSUMPTIONS
     return file_path, swarm_dir, assumptions_path
 
 
