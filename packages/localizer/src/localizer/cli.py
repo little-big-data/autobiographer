@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+from dotenv import load_dotenv
 
 from localizer.settings import LocalizerSettings
 
@@ -53,6 +54,7 @@ def _get_settings() -> LocalizerSettings:
 @click.group()
 def cli() -> None:
     """localizer — personal life-data fetch, normalize, and store."""
+    load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -298,12 +300,15 @@ def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None
 )
 def sync_cmd(since: int | None, dry_run: bool) -> None:
     """Sync all registered plugins."""
+    from rich.console import Console  # noqa: PLC0415
+
     from localizer.plugins import REGISTRY, load_builtin_plugins  # noqa: PLC0415
     from localizer.plugins.base import OutputTable  # noqa: PLC0415
     from localizer.store.db import LocalizerStore  # noqa: PLC0415
 
     load_builtin_plugins()
 
+    console = Console(stderr=True)
     store_path = _get_store_path()
     total_written = 0
 
@@ -321,9 +326,17 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
             with LocalizerStore(store_path) as store:
                 state = store.get_sync_state(plugin_id)
                 effective_since = state.get("last_synced_at")
+        records: list[dict[str, Any]] = []
+        page_label: list[str] = [""]
+
+        def _progress_cb(current: int, total: int, _pl: list[str] = page_label) -> None:
+            _pl[0] = f" page {current}/{total}"
 
         try:
-            records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
+            with console.status(f"  {plugin_id}: fetching…", spinner="dots") as status:
+                for record in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
+                    records.append(record)
+                    status.update(f"  {plugin_id}: fetching {len(records)} records{page_label[0]}…")
         except OSError as exc:
             click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
             continue
