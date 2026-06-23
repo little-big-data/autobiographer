@@ -346,24 +346,25 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
             click.echo(f"[dry-run] {plugin_id}: would write {count} record(s).")
             continue
 
-        with LocalizerStore(store_path) as store:
-            if OutputTable.EVENTS in output_tables:
-                store.upsert_events(records)
-            elif OutputTable.PLACES in output_tables:
-                store.upsert_places(records)
-            elif OutputTable.CONTENT in output_tables:
-                store.upsert_content(records)
-            else:
-                store.upsert_events(records)
+        with console.status(f"  {plugin_id}: writing {count} records…", spinner="dots"):
+            with LocalizerStore(store_path) as store:
+                if OutputTable.EVENTS in output_tables:
+                    store.upsert_events(records)
+                elif OutputTable.PLACES in output_tables:
+                    store.upsert_places(records)
+                elif OutputTable.CONTENT in output_tables:
+                    store.upsert_content(records)
+                else:
+                    store.upsert_events(records)
 
-            import time  # noqa: PLC0415
+                import time  # noqa: PLC0415
 
-            store.set_sync_state(
-                plugin_id,
-                last_synced_at=int(time.time()),
-                record_count=count,
-                status="ok",
-            )
+                store.set_sync_state(
+                    plugin_id,
+                    last_synced_at=int(time.time()),
+                    record_count=count,
+                    status="ok",
+                )
 
         total_written += count
         click.echo(f"  {plugin_id}: wrote {count} record(s).")
