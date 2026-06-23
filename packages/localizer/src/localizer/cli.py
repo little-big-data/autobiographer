@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 
 from localizer.settings import LocalizerSettings
 
+_BATCH_SIZE = 1_000  # records per DuckDB write; keeps peak RAM at O(batch) not O(total)
+
 
 def _get_store_path() -> Path:
     """Resolve the DuckDB store path via settings / env var.
@@ -254,28 +256,51 @@ def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None
             state = store.get_sync_state(source)
             effective_since = state.get("last_synced_at")
 
-    records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
-    count = len(records)
+    import time  # noqa: PLC0415
 
-    if dry_run:
-        click.echo(f"[dry-run] Would write {count} record(s) from '{source}' to store.")
-        return
+    from rich.console import Console  # noqa: PLC0415
 
     from localizer.plugins.base import OutputTable  # noqa: PLC0415
 
+    console = Console(stderr=True)
     output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
-    with LocalizerStore(store_path) as store:
+    count = 0
+    batch: list[dict[str, Any]] = []
+
+    def _upsert(store: Any, b: list[dict[str, Any]]) -> None:
         if OutputTable.EVENTS in output_tables:
-            store.upsert_events(records)
+            store.upsert_events(b)
         elif OutputTable.PLACES in output_tables:
-            store.upsert_places(records)
+            store.upsert_places(b)
         elif OutputTable.CONTENT in output_tables:
-            store.upsert_content(records)
+            store.upsert_content(b)
         else:
-            store.upsert_events(records)
+            store.upsert_events(b)
 
-        import time  # noqa: PLC0415
+    if dry_run:
+        with console.status(f"  {source}: counting…", spinner="dots") as status:
+            for _ in plugin.fetch_records(since=effective_since):
+                count += 1
+                status.update(f"  {source}: {count} records (dry-run)…")
+        click.echo(f"[dry-run] Would write {count} record(s) from '{source}' to store.")
+        return
 
+    with (
+        LocalizerStore(store_path) as store,
+        console.status(f"  {source}: fetching…", spinner="dots") as status,
+    ):
+        for record in plugin.fetch_records(since=effective_since):
+            batch.append(record)
+            count += 1
+            if len(batch) >= _BATCH_SIZE:
+                status.update(f"  {source}: writing batch… ({count} records so far)")
+                _upsert(store, batch)
+                batch.clear()
+            status.update(f"  {source}: fetching {count} records…")
+        if batch:
+            status.update(f"  {source}: writing final batch… ({count} records)")
+            _upsert(store, batch)
+            batch.clear()
         store.set_sync_state(
             source,
             last_synced_at=int(time.time()),
@@ -326,45 +351,68 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
             with LocalizerStore(store_path) as store:
                 state = store.get_sync_state(plugin_id)
                 effective_since = state.get("last_synced_at")
-        records: list[dict[str, Any]] = []
         page_label: list[str] = [""]
 
         def _progress_cb(current: int, total: int, _pl: list[str] = page_label) -> None:
             _pl[0] = f" page {current}/{total}"
 
-        try:
-            with console.status(f"  {plugin_id}: fetching…", spinner="dots") as status:
-                for record in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
-                    records.append(record)
-                    status.update(f"  {plugin_id}: fetching {len(records)} records{page_label[0]}…")
-        except OSError as exc:
-            click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
-            continue
-        count = len(records)
+        count = 0
+        batch: list[dict[str, Any]] = []
+
+        def _upsert_batch(
+            store: Any, b: list[dict[str, Any]], _ot: list[Any] = output_tables
+        ) -> None:
+            if OutputTable.EVENTS in _ot:
+                store.upsert_events(b)
+            elif OutputTable.PLACES in _ot:
+                store.upsert_places(b)
+            elif OutputTable.CONTENT in _ot:
+                store.upsert_content(b)
+            else:
+                store.upsert_events(b)
 
         if dry_run:
+            try:
+                with console.status(f"  {plugin_id}: counting…", spinner="dots") as status:
+                    for _ in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
+                        count += 1
+                        status.update(f"  {plugin_id}: {count} records{page_label[0]} (dry-run)…")
+            except OSError as exc:
+                click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
+                continue
             click.echo(f"[dry-run] {plugin_id}: would write {count} record(s).")
             continue
 
-        with console.status(f"  {plugin_id}: writing {count} records…", spinner="dots"):
-            with LocalizerStore(store_path) as store:
-                if OutputTable.EVENTS in output_tables:
-                    store.upsert_events(records)
-                elif OutputTable.PLACES in output_tables:
-                    store.upsert_places(records)
-                elif OutputTable.CONTENT in output_tables:
-                    store.upsert_content(records)
-                else:
-                    store.upsert_events(records)
+        try:
+            import time  # noqa: PLC0415
 
-                import time  # noqa: PLC0415
-
+            with (
+                LocalizerStore(store_path) as store,
+                console.status(f"  {plugin_id}: fetching…", spinner="dots") as status,
+            ):
+                for record in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
+                    batch.append(record)
+                    count += 1
+                    if len(batch) >= _BATCH_SIZE:
+                        status.update(
+                            f"  {plugin_id}: writing batch… ({count} records{page_label[0]})"
+                        )
+                        _upsert_batch(store, batch)
+                        batch.clear()
+                    status.update(f"  {plugin_id}: fetching {count} records{page_label[0]}…")
+                if batch:
+                    status.update(f"  {plugin_id}: writing final batch… ({count} records)")
+                    _upsert_batch(store, batch)
+                    batch.clear()
                 store.set_sync_state(
                     plugin_id,
                     last_synced_at=int(time.time()),
                     record_count=count,
                     status="ok",
                 )
+        except OSError as exc:
+            click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
+            continue
 
         total_written += count
         click.echo(f"  {plugin_id}: wrote {count} record(s).")
