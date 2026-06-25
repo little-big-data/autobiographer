@@ -32,6 +32,13 @@ class SwarmPlugin(SourcePlugin):
     ICON = ":material/location_on:"
 
     def __init__(self, swarm_dir: str | None = None) -> None:
+        if swarm_dir is None:
+            try:
+                from localizer.settings import LocalizerSettings  # noqa: PLC0415
+
+                swarm_dir = LocalizerSettings().get_setting("swarm_dir") or None
+            except ImportError:
+                pass
         self._swarm_dir = swarm_dir
 
     def get_config_fields(self) -> list[dict[str, Any]]:
