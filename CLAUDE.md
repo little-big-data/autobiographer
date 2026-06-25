@@ -14,6 +14,8 @@ This document serves as the foundational mandate for all development work perfor
 *   **Use the venv**: Always activate the project venv (`venv/`) before running Python commands or installing packages; do not use system Python.
 *   **Verify installs**: After installing a package, confirm it landed in the venv with `which python` and `pip list` before assuming a fix worked.
 *   **pyproject.toml is canonical**: Any package imported in source must be listed in `pyproject.toml [project.dependencies]`. `requirements.txt` is for local venv convenience only — CI installs from `pyproject.toml`.
+*   **Monorepo setup**: After cloning, install the `localizer` sub-package in editable mode before the top-level package: `pip install -e packages/localizer/ && pip install -e .` — both installs are required; skipping the first causes `ModuleNotFoundError: No module named 'localizer'` at runtime and in tests.
+*   **Data refresh**: Run `localizer sync` (the canonical data-refresh command) to populate `~/.localizer/store.duckdb` before starting the Streamlit app. All visualization pages read from that DuckDB file via `LocalizerBroker`.
 
 ## Streamlit API deprecations
 

@@ -66,6 +66,20 @@ class LastFmPlugin(SourcePlugin):
             Dicts with keys: ``source_id``, ``timestamp``, ``label``,
             ``sublabel``, ``category``, ``raw_json``, ``fetched_at``.
         """
+        missing = [
+            v
+            for v in (
+                "AUTOBIO_LASTFM_API_KEY",
+                "AUTOBIO_LASTFM_API_SECRET",
+                "AUTOBIO_LASTFM_USERNAME",
+            )
+            if not os.environ.get(v)
+        ]
+        if missing:
+            raise OSError(
+                f"{', '.join(missing)} environment variable(s) are not set. "
+                "Set them to enable Last.fm sync."
+            )
         fetcher = LastFmFetcher(
             api_key=os.environ["AUTOBIO_LASTFM_API_KEY"],
             api_secret=os.environ["AUTOBIO_LASTFM_API_SECRET"],
