@@ -14,11 +14,11 @@ from typing import Any
 import pandas as pd
 
 from plugins.sources import register
-from plugins.sources.base import SourcePlugin
+from plugins.sources.base import _LegacyAutoPlugin
 
 
 @register
-class AssumptionsPlugin(SourcePlugin):
+class AssumptionsPlugin(_LegacyAutoPlugin):
     """Load location assumptions from a user-authored JSON file.
 
     The JSON file describes where the user was during periods not recorded
