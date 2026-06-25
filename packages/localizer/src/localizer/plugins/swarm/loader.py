@@ -155,9 +155,10 @@ class SwarmPlugin(SourcePlugin):
                 if since is not None and timestamp <= since:
                     continue
 
-                location = venue.get("location", {})
-                lat = location.get("lat")
-                lng = location.get("lng")
+                # lat/lng may be on the checkin directly (newer Swarm exports)
+                # or nested inside venue.location (older exports).
+                lat = checkin.get("lat") or venue.get("location", {}).get("lat")
+                lng = checkin.get("lng") or venue.get("location", {}).get("lng")
                 if lat is None or lng is None:
                     continue
 
