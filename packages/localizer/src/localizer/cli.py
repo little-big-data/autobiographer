@@ -227,15 +227,55 @@ def export_cmd(fmt: str, table: str | None, since: int | None, output: str) -> N
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False, help="Fetch but do not write to store."
 )
-def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None:
+@click.option(
+    "--set-dir",
+    "set_dir",
+    default=None,
+    type=click.Path(),
+    help="Save a directory path to config and use it for this fetch (e.g. swarm_dir).",
+)
+@click.option(
+    "--set-file",
+    "set_file",
+    default=None,
+    type=click.Path(),
+    help="Save a file path to config and use it for this fetch (e.g. csv_path).",
+)
+def fetch_cmd(
+    source: str,
+    since: int | None,
+    full: bool,
+    dry_run: bool,
+    set_dir: str | None,
+    set_file: str | None,
+) -> None:
     """Fetch records from SOURCE plugin and write to the store.
 
     SOURCE must be a registered plugin ID (e.g. 'lastfm', 'swarm').
+
+    Use --set-dir or --set-file to save a path to config in the same step:
+
+      localizer fetch swarm --set-dir "G:/My Drive/Swarm Export"
+      localizer fetch letterboxd --set-file "/path/to/diary.csv"
     """
     from localizer.plugins import REGISTRY, load_builtin_plugins  # noqa: PLC0415
     from localizer.store.db import LocalizerStore  # noqa: PLC0415
 
     load_builtin_plugins()
+
+    # Persist and apply any inline path config.
+    settings = _get_settings()
+    if set_dir:
+        settings.set_setting(f"{source}_dir", set_dir)
+    if set_file:
+        # Derive the config key from the plugin's first file_path field, fallback to csv_path.
+        plugin_proto_cls = REGISTRY.get(source)
+        if plugin_proto_cls:
+            fields = plugin_proto_cls().get_config_fields()
+            file_key = next((f["key"] for f in fields if f.get("type") == "file_path"), "csv_path")
+        else:
+            file_key = "csv_path"
+        settings.set_setting(file_key, set_file)
 
     if source not in REGISTRY:
         click.echo(

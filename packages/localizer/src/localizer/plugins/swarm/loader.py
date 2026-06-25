@@ -141,7 +141,17 @@ class SwarmPlugin(SourcePlugin):
                 if created_at is None:
                     continue
 
-                timestamp = int(created_at)
+                try:
+                    timestamp = int(created_at)
+                except (ValueError, TypeError):
+                    from datetime import datetime  # noqa: PLC0415
+
+                    try:
+                        timestamp = int(
+                            datetime.fromisoformat(str(created_at).replace(" ", "T")).timestamp()
+                        )
+                    except (ValueError, AttributeError):
+                        continue
                 if since is not None and timestamp <= since:
                     continue
 
