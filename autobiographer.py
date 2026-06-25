@@ -22,10 +22,18 @@ from core.fetch_utils import FetchCheckpoint, retry_with_backoff
 load_dotenv()
 
 
-class Autobiographer:  # TODO(subtask-7): remove — thin shim; logic moved to LastFmFetcher
+class Autobiographer:
     """Thin shim around LastFmFetcher that preserves the legacy public API."""
 
     def __init__(self, api_key: str, api_secret: str, username: str):
+        import warnings
+
+        warnings.warn(
+            "Autobiographer is deprecated. Use localizer.plugins.lastfm.fetcher.LastFmFetcher "
+            "directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.api_key = api_key
         self.api_secret = api_secret
         self.username = username

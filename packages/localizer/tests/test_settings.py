@@ -89,3 +89,47 @@ def test_set_and_get_setting_roundtrip(tmp_path: Path) -> None:
     settings.set_setting("mykey", "myval")
     result = settings.get_setting("mykey")
     assert result == "myval", f"Expected 'myval' after set_setting round-trip, got: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 6. get_assumptions_path — default
+# ---------------------------------------------------------------------------
+
+
+def test_get_assumptions_path_default(tmp_path: Path) -> None:
+    """get_assumptions_path() must return 'default_assumptions.json' when unconfigured."""
+    env_without = {k: v for k, v in os.environ.items() if k != "LOCALIZER_ASSUMPTIONS_PATH"}
+    with patch.dict(os.environ, env_without, clear=True):
+        settings = LocalizerSettings(config_path=tmp_path / "config.toml")
+        result = settings.get_assumptions_path()
+    assert result == "default_assumptions.json", f"Expected default, got: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 7. get_assumptions_path — env var override
+# ---------------------------------------------------------------------------
+
+
+def test_get_assumptions_path_env_override(tmp_path: Path) -> None:
+    """LOCALIZER_ASSUMPTIONS_PATH env var must override the default."""
+    custom = str(tmp_path / "custom.json")
+    settings = LocalizerSettings(config_path=tmp_path / "config.toml")
+    with patch.dict(os.environ, {"LOCALIZER_ASSUMPTIONS_PATH": custom}):
+        result = settings.get_assumptions_path()
+    assert result == custom, f"Expected env override {custom!r}, got: {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# 8. get_assumptions_path — config file value
+# ---------------------------------------------------------------------------
+
+
+def test_get_assumptions_path_config_file(tmp_path: Path) -> None:
+    """assumptions_path in config.toml must be returned when no env var is set."""
+    config_path = tmp_path / "config.toml"
+    settings = LocalizerSettings(config_path=config_path)
+    settings.set_setting("assumptions_path", str(tmp_path / "my_assumptions.json"))
+    env_without = {k: v for k, v in os.environ.items() if k != "LOCALIZER_ASSUMPTIONS_PATH"}
+    with patch.dict(os.environ, env_without, clear=True):
+        result = settings.get_assumptions_path()
+    assert result == str(tmp_path / "my_assumptions.json"), f"Unexpected result: {result!r}"

@@ -32,6 +32,13 @@ class SwarmPlugin(SourcePlugin):
     ICON = ":material/location_on:"
 
     def __init__(self, swarm_dir: str | None = None) -> None:
+        if swarm_dir is None:
+            try:
+                from localizer.settings import LocalizerSettings  # noqa: PLC0415
+
+                swarm_dir = LocalizerSettings().get_setting("swarm_dir") or None
+            except ImportError:
+                pass
         self._swarm_dir = swarm_dir
 
     def get_config_fields(self) -> list[dict[str, Any]]:
@@ -134,13 +141,24 @@ class SwarmPlugin(SourcePlugin):
                 if created_at is None:
                     continue
 
-                timestamp = int(created_at)
+                try:
+                    timestamp = int(created_at)
+                except (ValueError, TypeError):
+                    from datetime import datetime  # noqa: PLC0415
+
+                    try:
+                        timestamp = int(
+                            datetime.fromisoformat(str(created_at).replace(" ", "T")).timestamp()
+                        )
+                    except (ValueError, AttributeError):
+                        continue
                 if since is not None and timestamp <= since:
                     continue
 
-                location = venue.get("location", {})
-                lat = location.get("lat")
-                lng = location.get("lng")
+                # lat/lng may be on the checkin directly (newer Swarm exports)
+                # or nested inside venue.location (older exports).
+                lat = checkin.get("lat") or venue.get("location", {}).get("lat")
+                lng = checkin.get("lng") or venue.get("location", {}).get("lng")
                 if lat is None or lng is None:
                     continue
 

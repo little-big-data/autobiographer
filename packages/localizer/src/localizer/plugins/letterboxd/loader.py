@@ -82,11 +82,16 @@ class LetterboxdPlugin(SourcePlugin):
         Raises:
             FileNotFoundError: If ``csv_path`` is provided but does not exist.
         """
+        if csv_path is None:
+            try:
+                from localizer.settings import LocalizerSettings  # noqa: PLC0415
+
+                csv_path = LocalizerSettings().get_setting("csv_path") or None
+            except ImportError:
+                pass
         if csv_path is not None:
             yield from self._parse_csv(csv_path)
-        else:
-            # Playwright path not implemented — yield nothing for now
-            return
+        # else: no path configured, yield nothing
 
     def _parse_csv(self, csv_path: str) -> Iterator[dict[str, Any]]:
         """Parse a Letterboxd diary CSV export file.
