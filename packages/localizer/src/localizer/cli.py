@@ -341,12 +341,16 @@ def fetch_cmd(
             status.update(f"  {source}: writing final batch… ({count} records)")
             _upsert(store, batch)
             batch.clear()
-        store.set_sync_state(
-            source,
-            last_synced_at=int(time.time()),
-            record_count=count,
-            status="ok",
-        )
+        # Only advance the cursor when records were actually written — a zero-record
+        # run (misconfiguration, transient error) must not set last_synced_at to now,
+        # or the next run would filter out all historical data.
+        if count > 0:
+            store.set_sync_state(
+                source,
+                last_synced_at=int(time.time()),
+                record_count=count,
+                status="ok",
+            )
 
     click.echo(f"Fetched and stored {count} record(s) from '{source}'.")
 
@@ -444,12 +448,13 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
                     status.update(f"  {plugin_id}: writing final batch… ({count} records)")
                     _upsert_batch(store, batch)
                     batch.clear()
-                store.set_sync_state(
-                    plugin_id,
-                    last_synced_at=int(time.time()),
-                    record_count=count,
-                    status="ok",
-                )
+                if count > 0:
+                    store.set_sync_state(
+                        plugin_id,
+                        last_synced_at=int(time.time()),
+                        record_count=count,
+                        status="ok",
+                    )
         except OSError as exc:
             click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
             continue
