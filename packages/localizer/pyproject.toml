@@ -10,6 +10,7 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "feedparser>=6.0",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

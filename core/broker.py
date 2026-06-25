@@ -22,6 +22,7 @@ Typical usage::
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,12 @@ class DataBroker:
     """
 
     def __init__(self) -> None:
+        warnings.warn(
+            "DataBroker is deprecated and will be removed in a future version. "
+            "Use LocalizerBroker instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._sources: dict[str, pd.DataFrame] = {}
         self._available_types: list[str] = []
 

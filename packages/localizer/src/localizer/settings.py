@@ -124,10 +124,25 @@ class LocalizerSettings:
         self._config_path.parent.mkdir(parents=True, exist_ok=True)
         lines = []
         for key, value in data.items():
-            # Serialize all values as TOML strings.
-            escaped = str(value).replace('"', '\\"')
+            # Serialize all values as TOML strings; escape backslashes then quotes.
+            escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
             lines.append(f'{key} = "{escaped}"')
         self._config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def get_assumptions_path(self) -> str:
+        """Return the path to the location assumptions JSON file.
+
+        Checks ``LOCALIZER_ASSUMPTIONS_PATH`` env var first, then
+        ``assumptions_path`` in config.toml, then falls back to
+        ``"default_assumptions.json"`` (the project-root default).
+
+        Returns:
+            Path string to the assumptions JSON file.
+        """
+        env_path = os.environ.get("LOCALIZER_ASSUMPTIONS_PATH")
+        if env_path:
+            return env_path
+        return str(self.get_setting("assumptions_path", "default_assumptions.json"))
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Read a setting from the config file.

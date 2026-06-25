@@ -20,8 +20,11 @@ from pathlib import Path
 from typing import Any
 
 import click
+from dotenv import load_dotenv
 
 from localizer.settings import LocalizerSettings
+
+_BATCH_SIZE = 1_000  # records per DuckDB write; keeps peak RAM at O(batch) not O(total)
 
 
 def _get_store_path() -> Path:
@@ -53,6 +56,7 @@ def _get_settings() -> LocalizerSettings:
 @click.group()
 def cli() -> None:
     """localizer — personal life-data fetch, normalize, and store."""
+    load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -223,15 +227,55 @@ def export_cmd(fmt: str, table: str | None, since: int | None, output: str) -> N
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False, help="Fetch but do not write to store."
 )
-def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None:
+@click.option(
+    "--set-dir",
+    "set_dir",
+    default=None,
+    type=click.Path(),
+    help="Save a directory path to config and use it for this fetch (e.g. swarm_dir).",
+)
+@click.option(
+    "--set-file",
+    "set_file",
+    default=None,
+    type=click.Path(),
+    help="Save a file path to config and use it for this fetch (e.g. csv_path).",
+)
+def fetch_cmd(
+    source: str,
+    since: int | None,
+    full: bool,
+    dry_run: bool,
+    set_dir: str | None,
+    set_file: str | None,
+) -> None:
     """Fetch records from SOURCE plugin and write to the store.
 
     SOURCE must be a registered plugin ID (e.g. 'lastfm', 'swarm').
+
+    Use --set-dir or --set-file to save a path to config in the same step:
+
+      localizer fetch swarm --set-dir "G:/My Drive/Swarm Export"
+      localizer fetch letterboxd --set-file "/path/to/diary.csv"
     """
     from localizer.plugins import REGISTRY, load_builtin_plugins  # noqa: PLC0415
     from localizer.store.db import LocalizerStore  # noqa: PLC0415
 
     load_builtin_plugins()
+
+    # Persist and apply any inline path config.
+    settings = _get_settings()
+    if set_dir:
+        settings.set_setting(f"{source}_dir", set_dir)
+    if set_file:
+        # Derive the config key from the plugin's first file_path field, fallback to csv_path.
+        plugin_proto_cls = REGISTRY.get(source)
+        if plugin_proto_cls:
+            fields = plugin_proto_cls().get_config_fields()
+            file_key = next((f["key"] for f in fields if f.get("type") == "file_path"), "csv_path")
+        else:
+            file_key = "csv_path"
+        settings.set_setting(file_key, set_file)
 
     if source not in REGISTRY:
         click.echo(
@@ -252,34 +296,61 @@ def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None
             state = store.get_sync_state(source)
             effective_since = state.get("last_synced_at")
 
-    records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
-    count = len(records)
+    import time  # noqa: PLC0415
 
-    if dry_run:
-        click.echo(f"[dry-run] Would write {count} record(s) from '{source}' to store.")
-        return
+    from rich.console import Console  # noqa: PLC0415
 
     from localizer.plugins.base import OutputTable  # noqa: PLC0415
 
+    console = Console(stderr=True)
     output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
-    with LocalizerStore(store_path) as store:
+    count = 0
+    batch: list[dict[str, Any]] = []
+
+    def _upsert(store: Any, b: list[dict[str, Any]]) -> None:
         if OutputTable.EVENTS in output_tables:
-            store.upsert_events(records)
+            store.upsert_events(b)
         elif OutputTable.PLACES in output_tables:
-            store.upsert_places(records)
+            store.upsert_places(b)
         elif OutputTable.CONTENT in output_tables:
-            store.upsert_content(records)
+            store.upsert_content(b)
         else:
-            store.upsert_events(records)
+            store.upsert_events(b)
 
-        import time  # noqa: PLC0415
+    if dry_run:
+        with console.status(f"  {source}: counting…", spinner="dots") as status:
+            for _ in plugin.fetch_records(since=effective_since):
+                count += 1
+                status.update(f"  {source}: {count} records (dry-run)…")
+        click.echo(f"[dry-run] Would write {count} record(s) from '{source}' to store.")
+        return
 
-        store.set_sync_state(
-            source,
-            last_synced_at=int(time.time()),
-            record_count=count,
-            status="ok",
-        )
+    with (
+        LocalizerStore(store_path) as store,
+        console.status(f"  {source}: fetching…", spinner="dots") as status,
+    ):
+        for record in plugin.fetch_records(since=effective_since):
+            batch.append(record)
+            count += 1
+            if len(batch) >= _BATCH_SIZE:
+                status.update(f"  {source}: writing batch… ({count} records so far)")
+                _upsert(store, batch)
+                batch.clear()
+            status.update(f"  {source}: fetching {count} records…")
+        if batch:
+            status.update(f"  {source}: writing final batch… ({count} records)")
+            _upsert(store, batch)
+            batch.clear()
+        # Only advance the cursor when records were actually written — a zero-record
+        # run (misconfiguration, transient error) must not set last_synced_at to now,
+        # or the next run would filter out all historical data.
+        if count > 0:
+            store.set_sync_state(
+                source,
+                last_synced_at=int(time.time()),
+                record_count=count,
+                status="ok",
+            )
 
     click.echo(f"Fetched and stored {count} record(s) from '{source}'.")
 
@@ -298,17 +369,24 @@ def fetch_cmd(source: str, since: int | None, full: bool, dry_run: bool) -> None
 )
 def sync_cmd(since: int | None, dry_run: bool) -> None:
     """Sync all registered plugins."""
+    from rich.console import Console  # noqa: PLC0415
+
     from localizer.plugins import REGISTRY, load_builtin_plugins  # noqa: PLC0415
     from localizer.plugins.base import OutputTable  # noqa: PLC0415
     from localizer.store.db import LocalizerStore  # noqa: PLC0415
 
     load_builtin_plugins()
 
+    console = Console(stderr=True)
     store_path = _get_store_path()
     total_written = 0
 
     for plugin_id, plugin_cls in sorted(REGISTRY.items()):
-        plugin = plugin_cls()
+        try:
+            plugin = plugin_cls()
+        except TypeError as exc:
+            click.echo(f"  {plugin_id}: skipped (requires configuration — {exc})", err=True)
+            continue
         output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
 
         # Determine effective since from sync state.
@@ -317,32 +395,69 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
             with LocalizerStore(store_path) as store:
                 state = store.get_sync_state(plugin_id)
                 effective_since = state.get("last_synced_at")
+        page_label: list[str] = [""]
 
-        records: list[dict[str, Any]] = list(plugin.fetch_records(since=effective_since))
-        count = len(records)
+        def _progress_cb(current: int, total: int, _pl: list[str] = page_label) -> None:
+            _pl[0] = f" page {current}/{total}"
+
+        count = 0
+        batch: list[dict[str, Any]] = []
+
+        def _upsert_batch(
+            store: Any, b: list[dict[str, Any]], _ot: list[Any] = output_tables
+        ) -> None:
+            if OutputTable.EVENTS in _ot:
+                store.upsert_events(b)
+            elif OutputTable.PLACES in _ot:
+                store.upsert_places(b)
+            elif OutputTable.CONTENT in _ot:
+                store.upsert_content(b)
+            else:
+                store.upsert_events(b)
 
         if dry_run:
+            try:
+                with console.status(f"  {plugin_id}: counting…", spinner="dots") as status:
+                    for _ in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
+                        count += 1
+                        status.update(f"  {plugin_id}: {count} records{page_label[0]} (dry-run)…")
+            except OSError as exc:
+                click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
+                continue
             click.echo(f"[dry-run] {plugin_id}: would write {count} record(s).")
             continue
 
-        with LocalizerStore(store_path) as store:
-            if OutputTable.EVENTS in output_tables:
-                store.upsert_events(records)
-            elif OutputTable.PLACES in output_tables:
-                store.upsert_places(records)
-            elif OutputTable.CONTENT in output_tables:
-                store.upsert_content(records)
-            else:
-                store.upsert_events(records)
-
+        try:
             import time  # noqa: PLC0415
 
-            store.set_sync_state(
-                plugin_id,
-                last_synced_at=int(time.time()),
-                record_count=count,
-                status="ok",
-            )
+            with (
+                LocalizerStore(store_path) as store,
+                console.status(f"  {plugin_id}: fetching…", spinner="dots") as status,
+            ):
+                for record in plugin.fetch_records(since=effective_since, progress_cb=_progress_cb):
+                    batch.append(record)
+                    count += 1
+                    if len(batch) >= _BATCH_SIZE:
+                        status.update(
+                            f"  {plugin_id}: writing batch… ({count} records{page_label[0]})"
+                        )
+                        _upsert_batch(store, batch)
+                        batch.clear()
+                    status.update(f"  {plugin_id}: fetching {count} records{page_label[0]}…")
+                if batch:
+                    status.update(f"  {plugin_id}: writing final batch… ({count} records)")
+                    _upsert_batch(store, batch)
+                    batch.clear()
+                if count > 0:
+                    store.set_sync_state(
+                        plugin_id,
+                        last_synced_at=int(time.time()),
+                        record_count=count,
+                        status="ok",
+                    )
+        except OSError as exc:
+            click.echo(f"  {plugin_id}: skipped ({exc})", err=True)
+            continue
 
         total_written += count
         click.echo(f"  {plugin_id}: wrote {count} record(s).")
