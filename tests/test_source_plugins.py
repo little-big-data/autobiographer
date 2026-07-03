@@ -10,6 +10,7 @@ import pandas as pd
 from plugins.sources import REGISTRY, load_builtin_plugins
 from plugins.sources.assumptions.loader import AssumptionsPlugin
 from plugins.sources.base import SourcePlugin, validate_schema
+from plugins.sources.google_timeline.loader import GoogleTimelinePlugin
 from plugins.sources.lastfm.loader import LastFmPlugin
 from plugins.sources.swarm.loader import SwarmPlugin
 
@@ -69,6 +70,9 @@ class TestRegistry(unittest.TestCase):
 
     def test_assumptions_registered(self):
         self.assertIn("assumptions", REGISTRY)
+
+    def test_google_timeline_registered(self):
+        self.assertIn("google_timeline", REGISTRY)
 
     def test_registry_values_are_source_plugin_subclasses(self):
         for plugin_cls in REGISTRY.values():
@@ -205,6 +209,92 @@ class TestSwarmPlugin(unittest.TestCase):
         schema = self.plugin.get_schema()
         self.assertIsInstance(schema, dict)
         self.assertIn("lat", schema)
+
+
+class TestGoogleTimelinePlugin(unittest.TestCase):
+    """Tests for the GoogleTimelinePlugin."""
+
+    def setUp(self):
+        self.plugin = GoogleTimelinePlugin()
+        # Parser output shape: same columns as load_swarm_data.
+        self.fixture_df = pd.DataFrame(
+            {
+                "timestamp": [1610000000, 1610000200],
+                "offset": [-300, -300],
+                "city": ["TestCity", "TestCity"],
+                "state": ["TestState", "TestState"],
+                "country": ["US", "US"],
+                "venue": ["My Home Base", "Walking"],
+                "venue_category": ["home", "activity:walking"],
+                "lat": [40.0, 43.0],
+                "lng": [-74.0, -77.0],
+                "event_category": ["", ""],
+                "shout": ["", ""],
+            }
+        )
+
+    def test_plugin_type(self):
+        self.assertEqual(self.plugin.PLUGIN_TYPE, "where-when")
+
+    def test_plugin_id(self):
+        self.assertEqual(self.plugin.PLUGIN_ID, "google_timeline")
+
+    def test_not_fetchable(self):
+        self.assertFalse(self.plugin.FETCHABLE)
+
+    def test_fetch_raises_not_implemented(self):
+        with self.assertRaises(NotImplementedError):
+            self.plugin.fetch()
+
+    def test_config_fields_returns_list(self):
+        fields = self.plugin.get_config_fields()
+        self.assertIsInstance(fields, list)
+        self.assertTrue(any(f["key"] == "timeline_path" for f in fields))
+
+    def test_timeline_path_field_type_is_file_path(self):
+        fields = self.plugin.get_config_fields()
+        field = next(f for f in fields if f["key"] == "timeline_path")
+        self.assertEqual(field["type"], "file_path")
+        self.assertIn("file_types", field)
+
+    def test_load_adds_normalized_columns(self):
+        with patch("analysis_utils.load_google_timeline") as mock_load:
+            mock_load.return_value = self.fixture_df.copy()
+            df = self.plugin.load({"timeline_path": "fake/Timeline.json"})
+
+        self.assertIn("place_name", df.columns)
+        self.assertIn("place_type", df.columns)
+        self.assertIn("source_id", df.columns)
+        self.assertEqual(df["place_name"].iloc[0], "My Home Base")
+        self.assertEqual(df["place_type"].iloc[0], "home")
+        self.assertEqual(df["source_id"].iloc[0], "google_timeline")
+
+    def test_load_passes_schema_validation(self):
+        with patch("analysis_utils.load_google_timeline") as mock_load:
+            mock_load.return_value = self.fixture_df.copy()
+            df = self.plugin.load({"timeline_path": "fake/Timeline.json"})
+        # Should not raise — all where-when columns present.
+        validate_schema(df, "where-when")
+
+    def test_load_returns_empty_df_when_no_path(self):
+        df = self.plugin.load({"timeline_path": ""})
+        self.assertTrue(df.empty)
+
+    def test_load_returns_empty_df_when_source_empty(self):
+        with patch("analysis_utils.load_google_timeline") as mock_load:
+            mock_load.return_value = pd.DataFrame()
+            df = self.plugin.load({"timeline_path": "fake/Timeline.json"})
+        self.assertTrue(df.empty)
+
+    def test_get_schema_returns_dict(self):
+        schema = self.plugin.get_schema()
+        self.assertIsInstance(schema, dict)
+        self.assertIn("lat", schema)
+
+    def test_manual_download_instructions_mention_takeout(self):
+        instructions = self.plugin.get_manual_download_instructions()
+        self.assertIn("Takeout", instructions)
+        self.assertIn("Timeline", instructions)
 
 
 class TestAssumptionsPlugin(unittest.TestCase):

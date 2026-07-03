@@ -156,7 +156,7 @@ class TestSidebarDataLoading(unittest.TestCase):
         import pandas as pd
 
         raw_df = pd.DataFrame({"date_text": pd.to_datetime(["2024-01-01"])})
-        config = ("/path/to/file.csv", "", "default_assumptions.json")
+        config = ("/path/to/file.csv", "", "default_assumptions.json", "")
         plugin_cls = MagicMock(return_value=MagicMock())
         plugin_cls.return_value.get_config_fields.return_value = [
             {"key": "data_path", "label": "CSV", "type": "file_path"}

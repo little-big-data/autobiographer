@@ -6,12 +6,15 @@ the date filter directly to the already-loaded ``_raw_df`` in session state.
 
 Session state contract
 ----------------------
-``_current_config``  : ``(file_path, swarm_dir, assumptions_path)`` — written by
-                        ``render_sidebar()`` every run so pages can inspect it.
+``_current_config``  : ``(file_path, swarm_dir, assumptions_path, timeline_path)`` —
+                        written by ``render_sidebar()`` every run so pages can inspect
+                        it. ``timeline_path`` is appended last so existing index
+                        access ([0]–[2]) stays valid.
 ``_loaded_config``   : same tuple — written after a successful data load to mark
                         that ``_raw_df`` is current for this config.
-``_raw_df``          : unfiltered merged DataFrame (Last.fm + Swarm offsets).
-``swarm_df``         : raw Swarm checkins DataFrame, or None.
+``_raw_df``          : unfiltered merged DataFrame (Last.fm + location offsets).
+``swarm_df``         : combined location DataFrame (Swarm checkins + Google Timeline
+                        visits/activities), sorted by timestamp, or None.
 ``df``               : date-filtered view of ``_raw_df`` for the active session.
 ``_cache_status``    : ``"hit"`` or ``"miss"`` — shown in Data Sources page.
 
@@ -33,6 +36,7 @@ from analysis_utils import (
     get_cache_key,
     get_cached_data,
     load_assumptions,
+    load_google_timeline,
     load_listening_data,
     load_swarm_data,
     save_to_cache,
@@ -81,11 +85,13 @@ def invalidate_data_cache() -> None:
     st.session_state.pop("_raw_df", None)
 
 
-def _resolve_configs() -> tuple[str, str, str]:
+def _resolve_configs() -> tuple[str, str, str, str]:
     """Read plugin config paths from session state.
 
     Returns:
-        ``(file_path, swarm_dir, assumptions_path)`` tuple.
+        ``(file_path, swarm_dir, assumptions_path, timeline_path)`` tuple. The
+        Google Timeline path is appended last so existing index-based access to the
+        first three elements remains valid.
     """
     configs: dict[str, dict[str, str]] = {}
     for plugin_id, plugin_cls in REGISTRY.items():
@@ -104,24 +110,30 @@ def _resolve_configs() -> tuple[str, str, str]:
             assumptions_path = LocalizerSettings().get_assumptions_path()
         except ImportError:
             assumptions_path = _DEFAULT_ASSUMPTIONS
-    return file_path, swarm_dir, assumptions_path
+    timeline_path = configs.get("google_timeline", {}).get("timeline_path", "")
+    return file_path, swarm_dir, assumptions_path, timeline_path
 
 
 def _load_data_with_progress(
     file_path: str,
     swarm_dir: str,
     assumptions_path: str,
+    timeline_path: str = "",
 ) -> None:
     """Load all data sources with a visible progress widget; store in session state.
 
-    Reads the Last.fm CSV, optionally reads Swarm JSONs, checks the file
-    cache, and runs ``apply_swarm_offsets`` on a cache miss.  Results are
-    stored in ``st.session_state`` keys defined in the module docstring.
+    Reads the Last.fm CSV, optionally reads Swarm JSONs and a Google Timeline
+    export, checks the file cache, and runs ``apply_swarm_offsets`` on a cache
+    miss.  Swarm and Timeline location records are concatenated into a single
+    ``swarm_df`` (sorted by timestamp) so every geo view and the offset join
+    consume them uniformly.  Results are stored in ``st.session_state`` keys
+    defined in the module docstring.
 
     Args:
         file_path: Path to the Last.fm CSV file.
         swarm_dir: Directory containing Swarm JSON exports (may be empty).
         assumptions_path: Path to the assumptions JSON file.
+        timeline_path: Path to a Google Timeline JSON export (may be empty).
     """
     assumptions = load_assumptions(assumptions_path)
 
@@ -146,7 +158,17 @@ def _load_data_with_progress(
             else:
                 swarm_df = pd.DataFrame()
 
-            cache_key = get_cache_key(file_path, swarm_dir, assumptions_path)
+            # Fold in Google Timeline visits/activities, which share the swarm
+            # column schema, so all downstream geo views see a single frame.
+            if timeline_path and os.path.exists(timeline_path):
+                st.write("Loading Google Timeline data…")
+                timeline_df = load_google_timeline(timeline_path)
+                if not timeline_df.empty:
+                    swarm_df = pd.concat([swarm_df, timeline_df], ignore_index=True)
+                    # Re-sort: apply_swarm_offsets relies on ascending timestamps.
+                    swarm_df = swarm_df.sort_values("timestamp").reset_index(drop=True)
+
+            cache_key = get_cache_key(file_path, swarm_dir, assumptions_path, timeline_path)
             cached = get_cached_data(cache_key)
 
             if cached is not None:
@@ -180,9 +202,9 @@ def render_sidebar() -> None:
     load_builtin_plugins()
     load_config_into_session_state()
 
-    file_path, swarm_dir, assumptions_path = _resolve_configs()
+    file_path, swarm_dir, assumptions_path, timeline_path = _resolve_configs()
 
-    current_config = (file_path, swarm_dir, assumptions_path)
+    current_config = (file_path, swarm_dir, assumptions_path, timeline_path)
     st.session_state["_current_config"] = current_config
 
     if not file_path or not os.path.exists(file_path):
@@ -198,7 +220,7 @@ def render_sidebar() -> None:
     )
 
     if not already_loaded:
-        _load_data_with_progress(file_path, swarm_dir, assumptions_path)
+        _load_data_with_progress(file_path, swarm_dir, assumptions_path, timeline_path)
         if st.session_state.get("_raw_df") is not None:
             st.session_state["_loaded_config"] = current_config
 
