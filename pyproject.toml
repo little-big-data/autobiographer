@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.0",
     "ruptures>=1.1",
     "localizer @ file:packages/localizer",
+    "reverse_geocoder>=1.5",
 ]
 
 [project.optional-dependencies]
