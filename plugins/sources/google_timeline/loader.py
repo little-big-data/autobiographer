@@ -8,22 +8,24 @@ Streamlit runtime (FETCHABLE is False).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
 
 from plugins.sources import register
-from plugins.sources.base import SourcePlugin, validate_schema
+from plugins.sources.base import _LegacyAutoPlugin, validate_schema
 
 
 @register
-class GoogleTimelinePlugin(SourcePlugin):
+class GoogleTimelinePlugin(_LegacyAutoPlugin):
     """Load Google Maps Timeline location history from a local Timeline.json export."""
 
     PLUGIN_TYPE = "where-when"
     PLUGIN_ID = "google_timeline"
     DISPLAY_NAME = "Google Maps Timeline"
     ICON = ":material/map:"
+    FETCHABLE = False
 
     def get_config_fields(self) -> list[dict[str, Any]]:
         """Declare sidebar config fields for the Google Timeline plugin.
@@ -79,6 +81,43 @@ class GoogleTimelinePlugin(SourcePlugin):
 
         validate_schema(df, self.PLUGIN_TYPE)
         return df
+
+    def fetch_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield nothing — Google Timeline has no programmatic fetch path yet.
+
+        Data is loaded via ``load()`` from a manually-exported Timeline.json
+        file; there is no localizer-side plugin to delegate to (unlike Swarm
+        and Last.fm), so this satisfies the abstract ``SourcePlugin`` contract
+        without a DuckDB sync path.
+
+        Args:
+            since: Unused.
+            progress_cb: Unused.
+
+        Yields:
+            Nothing.
+        """
+        yield from []
+
+    def fetch(self, output_path: str | None = None, **kwargs: Any) -> None:
+        """Google Timeline does not support automatic fetching.
+
+        Args:
+            output_path: Unused.
+            **kwargs: Unused.
+
+        Raises:
+            NotImplementedError: Always, since Google Timeline requires a manual export.
+        """
+        raise NotImplementedError(
+            f"{self.PLUGIN_ID} does not support automatic fetching. "
+            "Run `python autobiographer.py fetch "
+            f"{self.PLUGIN_ID}` for manual download instructions."
+        )
 
     def get_manual_download_instructions(self) -> str:
         """Return instructions for exporting Google Maps Timeline data.
