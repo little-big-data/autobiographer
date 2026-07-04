@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+from localizer.plugins.lastfm.fetcher import LastFmFetcher
 from rich.progress import (
     BarColumn,
     Progress,
@@ -22,21 +23,25 @@ load_dotenv()
 
 
 class Autobiographer:
-    BASE_URL = "http://ws.audioscrobbler.com/2.0/"
+    """Thin shim around LastFmFetcher that preserves the legacy public API."""
 
     def __init__(self, api_key: str, api_secret: str, username: str):
+        import warnings
+
+        warnings.warn(
+            "Autobiographer is deprecated. Use localizer.plugins.lastfm.fetcher.LastFmFetcher "
+            "directly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.api_key = api_key
         self.api_secret = api_secret
         self.username = username
+        self._fetcher = LastFmFetcher(api_key=api_key, api_secret=api_secret, username=username)
 
-    def _fetch_page(self, method: str, params: dict) -> dict:
-        """Helper to fetch a single page from Last.fm API."""
-        params.update(
-            {"method": method, "api_key": self.api_key, "format": "json", "user": self.username}
-        )
-        response = requests.get(self.BASE_URL, params=params, timeout=30)
-        response.raise_for_status()
-        return response.json()  # type: ignore[no-any-return]
+    def _fetch_page(self, method: str, params: dict) -> dict[str, Any]:
+        """Delegate to LastFmFetcher._fetch_page."""
+        return self._fetcher._fetch_page(method, params)  # type: ignore[no-any-return]
 
     def fetch_recent_tracks(
         self,
@@ -50,6 +55,10 @@ class Autobiographer:
         max_retries: int = 3,
     ) -> list[dict[str, Any]]:
         """Fetch recent tracks for the user.
+
+        Delegates HTTP logic to LastFmFetcher.  The extra parameters not
+        supported by the fetcher (``to_ts``, ``checkpoint``, ``resume``) are
+        handled here in the shim so the legacy CLI contract is preserved.
 
         Args:
             limit: Tracks per API page (max 200).
