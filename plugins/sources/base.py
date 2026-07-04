@@ -1,49 +1,27 @@
-"""Abstract base class for all Autobiographer data source plugins."""
+"""Re-export shim — localizer is now the canonical source of SourcePlugin.
+
+All autobiographer code should import from ``localizer.plugins.base`` directly.
+This module is kept for backwards compatibility with external code that
+imports from ``plugins.sources.base``.
+
+``validate_schema``, ``_LegacyAutoPlugin``, and related helpers are
+autobiographer-specific and remain here for backwards compatibility.
+"""
 
 from __future__ import annotations
 
 import os
-from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
+from localizer.plugins.base import FetchMode, OutputTable, SourcePlugin
 
-# Required columns per plugin type. Validated at load time.
+# Required columns per legacy plugin type. Validated at load time.
 _REQUIRED_COLUMNS: dict[str, list[str]] = {
     "what-when": ["timestamp", "label", "sublabel", "category", "source_id"],
     "where-when": ["timestamp", "lat", "lng", "place_name", "place_type", "source_id"],
 }
-
-
-def _count_records_at_path(path: str) -> int | None:
-    """Return a record count for a file or directory.
-
-    CSV → row count; JSON file → top-level list length; directory → total
-    items across all .json files in the directory.  Returns None on any error.
-    """
-    try:
-        if os.path.isdir(path):
-            import json
-
-            total = 0
-            for fname in os.listdir(path):
-                if fname.lower().endswith(".json"):
-                    with open(os.path.join(path, fname)) as f:
-                        data = json.load(f)
-                    if isinstance(data, list):
-                        total += len(data)
-            return total or None
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".csv":
-            return len(pd.read_csv(path))
-        import json
-
-        with open(path) as f:
-            data = json.load(f)
-        return len(data) if isinstance(data, list) else None
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def validate_schema(df: pd.DataFrame, plugin_type: str) -> None:
@@ -62,159 +40,24 @@ def validate_schema(df: pd.DataFrame, plugin_type: str) -> None:
         raise ValueError(f"Plugin type '{plugin_type}' is missing required columns: {missing}")
 
 
-class SourcePlugin(ABC):
-    """Base class for all data source plugins.
+class _LegacyAutoPlugin(SourcePlugin):
+    """Base class that adds autobiographer-era helper methods to localizer SourcePlugin.
 
-    Subclasses must declare PLUGIN_TYPE, PLUGIN_ID, and DISPLAY_NAME as class
-    attributes, and implement get_config_fields() and load().
+    These methods (get_health_status, get_versioned_output_path) were part of
+    the original autobiographer SourcePlugin ABC. They remain here so that
+    legacy autobiographer plugins continue to work during the migration period.
 
-    Plugin types:
-        "what-when": Activity sources (music, films, books). Must emit columns:
-            timestamp, label, sublabel, category, source_id.
-        "where-when": Location sources (check-ins, GPS routes). Must emit columns:
-            timestamp, lat, lng, place_name, place_type, source_id.
-
-    Fetchability:
-        Set ``FETCHABLE = True`` and override ``get_fetch_env_vars()``, ``fetch()``,
-        and ``get_manual_download_instructions()`` for plugins that can retrieve data
-        programmatically. Non-fetchable plugins should only override
-        ``get_manual_download_instructions()`` to guide users through a manual export.
+    Concrete subclasses must still implement ``get_config_fields()`` and
+    ``fetch_records()`` to satisfy the localizer SourcePlugin ABC.
     """
-
-    PLUGIN_TYPE: str  # "what-when" or "where-when"
-    PLUGIN_ID: str  # unique identifier, e.g. "lastfm", "swarm"
-    DISPLAY_NAME: str  # human-readable name for the UI
-    ICON: str = ":material/database:"  # Material icon token shown in the sidebar
 
     FETCHABLE: bool = False
     """True if this plugin can programmatically retrieve data from its source."""
 
-    @abstractmethod
-    def get_config_fields(self) -> list[dict[str, Any]]:
-        """Declare sidebar config fields required by this plugin.
-
-        Each field dict must contain:
-            key (str): Config dict key.
-            label (str): Display label for the UI widget.
-            type (str): Widget type. Supported values:
-                "file_path" — opens a native file picker dialog.
-                "dir_path"  — opens a native directory picker dialog.
-                "text"      — plain text input (no file dialog).
-                "toggle"    — boolean checkbox.
-
-        Optional keys:
-            file_types (list[tuple[str, str]]): Pairs of (description, glob
-                pattern) passed to the file dialog, e.g.
-                ``[("CSV files", "*.csv"), ("All files", "*.*")]``.
-                Only used when type is "file_path".
-
-        Returns:
-            List of field descriptor dicts.
-        """
-
-    @abstractmethod
-    def load(self, config: dict[str, Any]) -> pd.DataFrame:
-        """Load and return a normalized DataFrame for this source.
-
-        The returned DataFrame must include all columns required for
-        PLUGIN_TYPE (see validate_schema). Implementations should call
-        validate_schema() before returning.
-
-        Args:
-            config: Dict of values keyed by the fields from get_config_fields().
-
-        Returns:
-            Normalized DataFrame.
-        """
-
-    def get_fetch_env_vars(self) -> list[dict[str, str]]:
-        """Return environment variables required to fetch data for this plugin.
-
-        Each entry is a dict with:
-            var (str): Environment variable name (e.g. ``"AUTOBIO_LASTFM_API_KEY"``).
-            description (str): Human-readable description shown when the var is absent.
-
-        Returns:
-            List of required env var descriptors. Empty when ``FETCHABLE`` is False.
-        """
-        return []
-
-    def fetch(self, output_path: str | None = None, **kwargs: Any) -> None:
-        """Programmatically fetch data from the source and write it to disk.
-
-        Only called when ``FETCHABLE`` is True. The default implementation raises
-        ``NotImplementedError``; fetchable plugins must override this method.
-
-        Args:
-            output_path: Destination path for the fetched file or directory.
-                If None the plugin writes to its default location under ``data/``.
-            **kwargs: Plugin-specific options (e.g. ``pages``, ``from_ts``, ``to_ts``
-                for the Last.fm plugin).
-
-        Raises:
-            NotImplementedError: Always, unless overridden by a fetchable plugin.
-            OSError: If required env vars declared by ``get_fetch_env_vars()`` are
-                missing — raised by the overriding implementation, not this base.
-        """
-        raise NotImplementedError(
-            f"{self.PLUGIN_ID} does not support automatic fetching. "
-            "Run `python autobiographer.py fetch "
-            f"{self.PLUGIN_ID}` for manual download instructions."
-        )
-
-    def get_default_output_path(self) -> str | None:
-        """Return the default path where fetched data will be saved.
-
-        Used by the sidebar to show the user exactly where the file will land
-        before they click Fetch, and to auto-populate the config field after
-        a successful fetch.
-
-        Returns:
-            Absolute or project-relative path string, or None if the plugin
-            does not write to a fixed default location.
-        """
-        return None
-
-    def get_fetch_identity(self) -> str | None:
-        """Return a short string identifying the account or source that will be fetched.
-
-        Shown in the app sidebar next to the fetch button so users can confirm
-        the correct account is configured before triggering a download.
-
-        Returns:
-            Human-readable identity string (e.g. ``"@username"``), or None if
-            not applicable for this plugin.
-        """
-        return None
-
-    def get_manual_download_instructions(self) -> str:
-        """Return human-readable instructions for obtaining this plugin's data.
-
-        Shown in the CLI when ``fetch`` is called on a non-fetchable plugin and
-        in the app sidebar when data has not been configured yet. Override in
-        every plugin to provide source-specific guidance.
-
-        Returns:
-            Multi-line instruction string.
-        """
-        return (
-            f"{self.DISPLAY_NAME} data must be obtained manually. "
-            "Please refer to the source's documentation for export options, "
-            "then point the plugin's config field at the downloaded file."
-        )
-
-    def get_health_status(
+    def get_health_status(  # noqa: PLR0912
         self, config: dict[str, Any], history: list[dict[str, Any]]
     ) -> dict[str, Any]:
         """Return health status derived from the current config and fetch history.
-
-        Status values:
-            ``"healthy"``      — data file exists and is not stale.
-            ``"stale"``        — fetchable plugin whose last fetch exceeds the
-                                 staleness threshold (default 24 h, overridable
-                                 via ``AUTOBIO_STALE_THRESHOLD_HOURS``).
-            ``"error"``        — configured path no longer exists on disk.
-            ``"unconfigured"`` — no primary config value has been set yet.
 
         Args:
             config: Dict of field_key → value from the plugin's config fields.
@@ -224,12 +67,19 @@ class SourcePlugin(ABC):
             Dict with keys ``status``, ``record_count`` (int or None),
             ``last_fetch`` (ISO string or None), ``data_path`` (str or None).
         """
+        from core.analysis_loader import _count_records_at_path  # noqa: PLC0415
+
         fields = self.get_config_fields()
         primary_key = fields[0]["key"] if fields else None
         data_path = config.get(primary_key, "").strip() if primary_key else ""
 
         def _result(status: str, rc: int | None = None, lf: str | None = None) -> dict[str, Any]:
-            return {"status": status, "record_count": rc, "last_fetch": lf, "data_path": data_path}
+            return {
+                "status": status,
+                "record_count": rc,
+                "last_fetch": lf,
+                "data_path": data_path,
+            }
 
         if not data_path:
             return {
@@ -242,17 +92,12 @@ class SourcePlugin(ABC):
         if not os.path.exists(data_path):
             return _result("error")
 
-        # Count records directly from the file/directory — history may be absent
-        # for non-fetchable plugins or on first run.
         record_count: int | None = _count_records_at_path(data_path)
         last_fetch: str | None = None
         if history:
             last_fetch = history[0].get("timestamp")
 
         if not self.FETCHABLE:
-            # Use the file/directory creation time as a proxy for when the data
-            # was last obtained.  os.path.getctime() returns creation time on
-            # Windows and inode-change time on POSIX (closest available proxy).
             if not last_fetch:
                 try:
                     ctime = os.path.getctime(data_path)
@@ -274,7 +119,6 @@ class SourcePlugin(ABC):
             except ValueError:
                 status = "healthy"
         else:
-            # No history — fall back to file mtime for staleness detection.
             try:
                 mtime = os.path.getmtime(data_path)
                 last_mtime = datetime.fromtimestamp(mtime, tz=timezone.utc)
@@ -286,12 +130,18 @@ class SourcePlugin(ABC):
 
         return _result(status, record_count, last_fetch)
 
+    def get_default_output_path(self) -> str | None:
+        """Return the default path where fetched data will be saved.
+
+        Override in subclasses that write to a fixed default location.
+
+        Returns:
+            Absolute or project-relative path string, or None.
+        """
+        return None
+
     def get_versioned_output_path(self) -> str:
         """Return a timestamped file path for a new fetch snapshot.
-
-        Derives the base name and extension from ``get_default_output_path()``,
-        inserting an ISO timestamp before the extension. Falls back to
-        ``data/{plugin_id}/{plugin_id}_{ts}.csv`` when no default is available.
 
         Returns:
             Path string with format ``<base>_<YYYY-MM-DDTHHMMSS><ext>``.
@@ -303,13 +153,11 @@ class SourcePlugin(ABC):
             return f"{base}_{ts}{ext or '.csv'}"
         return f"data/{self.PLUGIN_ID}/{self.PLUGIN_ID}_{ts}.csv"
 
-    def get_schema(self) -> dict[str, str]:
-        """Return column name → description metadata for this plugin.
 
-        Override to provide richer schema documentation for downstream
-        view compatibility checks.
-
-        Returns:
-            Dict mapping column names to human-readable descriptions.
-        """
-        return {}
+__all__ = [
+    "FetchMode",
+    "OutputTable",
+    "SourcePlugin",
+    "_LegacyAutoPlugin",
+    "validate_schema",
+]

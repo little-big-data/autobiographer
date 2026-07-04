@@ -38,9 +38,21 @@ def register(cls: type[SourcePlugin]) -> type[SourcePlugin]:
 
 
 def load_builtin_plugins() -> None:
-    """Import built-in plugins so they self-register via @register.
+    """Ensure all built-in plugins are present in REGISTRY.
 
-    Call this once at application startup before reading REGISTRY.
-    Actual plugin imports are added in later subtasks (3+).
+    Safe to call multiple times and after REGISTRY.clear() — always
+    re-registers, because @register only fires on first module import.
     """
-    pass
+    from localizer.plugins.feedly.loader import FeedlyPlugin
+    from localizer.plugins.github.loader import GitHubPlugin
+    from localizer.plugins.lastfm.loader import LastFmPlugin
+    from localizer.plugins.letterboxd.loader import LetterboxdPlugin
+    from localizer.plugins.rss.loader import RssPlugin
+    from localizer.plugins.swarm.loader import SwarmPlugin
+
+    REGISTRY[LastFmPlugin.PLUGIN_ID] = LastFmPlugin
+    REGISTRY[SwarmPlugin.PLUGIN_ID] = SwarmPlugin
+    REGISTRY[FeedlyPlugin.PLUGIN_ID] = FeedlyPlugin
+    REGISTRY[GitHubPlugin.PLUGIN_ID] = GitHubPlugin
+    REGISTRY[RssPlugin.PLUGIN_ID] = RssPlugin
+    REGISTRY[LetterboxdPlugin.PLUGIN_ID] = LetterboxdPlugin

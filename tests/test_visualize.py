@@ -165,6 +165,8 @@ class TestSidebarDataLoading(unittest.TestCase):
             "_loaded_config": config,
             "_raw_df": raw_df,
         }
+        mock_ls = MagicMock()
+        mock_ls.return_value.get_assumptions_path.return_value = "default_assumptions.json"
         with (
             patch("streamlit.session_state", session),
             patch("components.sidebar.REGISTRY", {"lastfm": plugin_cls}),
@@ -177,6 +179,7 @@ class TestSidebarDataLoading(unittest.TestCase):
             patch("components.sidebar.os.path.exists", return_value=True),
             patch("components.sidebar._load_data_with_progress") as mock_load,
             patch("streamlit.sidebar") as mock_sidebar,
+            patch("localizer.settings.LocalizerSettings", mock_ls),
         ):
             mock_sidebar.date_input.return_value = [
                 raw_df["date_text"].min().date(),

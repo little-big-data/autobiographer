@@ -48,9 +48,9 @@ from components.plugin_config import (
     settings,
 )
 from components.sidebar import invalidate_data_cache
+from core.analysis_loader import _count_records_at_path
 from core.fetch_utils import FetchCheckpoint
 from plugins.sources import REGISTRY, load_builtin_plugins
-from plugins.sources.base import _count_records_at_path
 
 _STATUS_META: dict[str, tuple[str, str]] = {
     "healthy": ("✅", "Healthy"),
@@ -260,15 +260,15 @@ def _render_swarm_analysis() -> None:
     # the configured directory so the cache can be built even before Last.fm
     # data is loaded (which is required for the sidebar data pipeline to run).
     if swarm_df is None or (isinstance(swarm_df, pd.DataFrame) and swarm_df.empty):
-        from analysis_utils import load_swarm_data
         from components.plugin_config import get_plugin_config_from_session
+        from core.analysis_loader import load_swarm_history
 
         cfg = get_plugin_config_from_session(
             "swarm", [{"key": "swarm_dir", "label": "", "type": "dir_path"}]
         )
         swarm_dir = cfg.get("swarm_dir", "")
         if swarm_dir and os.path.exists(swarm_dir):
-            swarm_df = load_swarm_data(swarm_dir)
+            swarm_df = load_swarm_history(swarm_dir)
             if swarm_df is not None and not swarm_df.empty:
                 # Persist so the sidebar's already_loaded check stays valid
                 # across the st.rerun() triggered by the build button.
