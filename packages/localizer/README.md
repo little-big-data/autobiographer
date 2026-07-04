@@ -83,12 +83,13 @@ List every registered plugin with its fetch mode and output table.
 
 ```
 $ localizer sources
-feedly      API      content
-github      API      events
-lastfm      API      events
-letterboxd  MANUAL   events
-rss         MANUAL   content
-swarm       MANUAL   places
+feedly           API      content
+github           API      events
+google_timeline  MANUAL   places
+lastfm           API      events
+letterboxd       MANUAL   events
+rss              MANUAL   content
+swarm            MANUAL   places
 ```
 
 Fetch modes:
@@ -225,6 +226,22 @@ localizer fetch swarm --full
 
 The export contains `checkins1.json`, `checkins2.json`, etc. The loader handles both the newer format (lat/lng on the checkin) and the older format (lat/lng nested inside `venue.location`).
 
+### Google Maps Timeline
+
+Check-ins land in `places`. Manual, local-file-only source — no network calls are made; the plugin only reads a `Timeline.json` file you export yourself.
+
+Google Maps Timeline data is stored on your device and must be exported manually, using either:
+
+- **Your phone** (recommended, gives the new format): Settings → Location → Location Services → Timeline → "Export Timeline data", then copy the exported `Timeline.json` to your computer.
+- **Google Takeout**: visit [takeout.google.com](https://takeout.google.com), deselect all, then select only "Location History (Timeline)", create the export, download the archive, and unzip it to find `Timeline.json`.
+
+Point localizer at the exported file:
+
+```bash
+localizer config set google_timeline_path "/path/to/Timeline.json"
+localizer fetch google_timeline
+```
+
 ### GitHub
 
 Commit history across repos you own or contribute to. Records land in `events` (`label` = repo, `sublabel` = commit message, `category` = short SHA).
@@ -281,7 +298,7 @@ All data lives in one DuckDB file at `~/.localizer/store.duckdb`. Upserts are id
 | Column | Type | Description |
 |---|---|---|
 | `id` | TEXT PK | Deterministic hash |
-| `source_id` | TEXT | `"swarm"`, `"google_location"`, … |
+| `source_id` | TEXT | `"swarm"`, `"google_timeline"`, … |
 | `timestamp` | BIGINT | Unix epoch UTC |
 | `lat` / `lng` | DOUBLE | Coordinates |
 | `place_name` | TEXT | Venue name (empty for GPS-only sources) |
