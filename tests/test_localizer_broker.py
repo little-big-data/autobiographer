@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -411,3 +412,208 @@ def test_make_broker_returns_localizer_broker_when_store_exists() -> None:
             mock_broker_cls.return_value = MagicMock(spec=LocalizerBroker)
             _make_broker()
     assert mock_broker_cls.called
+
+
+# ---------------------------------------------------------------------------
+# Subtask 1: get_events_frame() / get_places_frame() raw accessor tests
+# ---------------------------------------------------------------------------
+
+REQUIRED_EVENTS_COLUMNS = {"timestamp", "label", "sublabel", "category", "source_id"}
+REQUIRED_PLACES_COLUMNS = {"timestamp", "lat", "lng", "place_name", "place_type", "source_id"}
+
+
+def test_get_events_frame_returns_all_rows_with_expected_columns(tmp_path: Path) -> None:
+    """get_events_frame() on a store seeded with N events returns exactly N rows
+    with columns timestamp, label, sublabel, category, source_id."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_events(store, n=3)
+
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_events_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 3
+    assert REQUIRED_EVENTS_COLUMNS <= set(result.columns)
+
+
+def test_get_places_frame_returns_all_rows_with_expected_columns(tmp_path: Path) -> None:
+    """get_places_frame() on a store seeded with M places returns exactly M rows
+    with columns timestamp, lat, lng, place_name, place_type, source_id."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_places(store, n=2)
+
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_places_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 2
+    assert REQUIRED_PLACES_COLUMNS <= set(result.columns)
+
+
+def test_get_events_frame_empty_store_returns_empty_dataframe(tmp_path: Path) -> None:
+    """get_events_frame() on a fresh/empty store returns an empty DataFrame,
+    not None and not a raised exception."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_events_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+
+def test_get_places_frame_empty_store_returns_empty_dataframe(tmp_path: Path) -> None:
+    """get_places_frame() on a fresh/empty store returns an empty DataFrame,
+    not None and not a raised exception."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_places_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+
+def test_get_places_frame_unfiltered_across_multiple_source_ids(tmp_path: Path) -> None:
+    """get_places_frame() returns rows from multiple source_ids (unlike
+    get_frame(plugin_id), which filters to a single source)."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_places(store, n=2, source_id="swarm")
+        _seed_places(store, n=2, source_id="google_timeline")
+
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_places_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert len(result) == 4
+    assert set(result["source_id"]) == {"swarm", "google_timeline"}
+
+
+def test_get_events_frame_closes_connection_after_call(tmp_path: Path) -> None:
+    """After calling get_events_frame(), a second LocalizerStore can
+    immediately reopen the same DuckDB file (Windows-critical: an unclosed
+    handle would block tmp_path teardown / a second connection)."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_events(store, n=1)
+
+    broker = LocalizerBroker(store_path=db_path)
+    broker.get_events_frame()
+
+    try:
+        with LocalizerStore(path=db_path) as store2:
+            df = store2.query_events()
+            assert len(df) >= 1
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(
+            f"Could not re-open DuckDB after get_events_frame() — broker may "
+            f"have left connection open: {exc}"
+        )
+
+
+def test_get_places_frame_closes_connection_after_call(tmp_path: Path) -> None:
+    """After calling get_places_frame(), a second LocalizerStore can
+    immediately reopen the same DuckDB file (Windows-critical)."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_places(store, n=1)
+
+    broker = LocalizerBroker(store_path=db_path)
+    broker.get_places_frame()
+
+    try:
+        with LocalizerStore(path=db_path) as store2:
+            df = store2.query_places()
+            assert len(df) >= 1
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(
+            f"Could not re-open DuckDB after get_places_frame() — broker may "
+            f"have left connection open: {exc}"
+        )
+
+
+def test_get_events_frame_returns_empty_and_releases_connection_on_query_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If store.query_events() raises inside the with block, get_events_frame()
+    must still return an empty DataFrame (per the existing
+    `except Exception: return pd.DataFrame()` pattern) and the store's
+    connection must still be released (a fresh connection can reopen the file)."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_events(store, n=1)
+
+    def _raise_query_events(self: LocalizerStore, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        raise RuntimeError("simulated query failure")
+
+    monkeypatch.setattr(LocalizerStore, "query_events", _raise_query_events)
+
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_events_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+    # Connection must have been released despite the exception.
+    monkeypatch.undo()
+    try:
+        with LocalizerStore(path=db_path) as store2:
+            df = store2.query_events()
+            assert len(df) >= 1
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(
+            f"Could not re-open DuckDB after get_events_frame() raised — "
+            f"broker may have left connection open: {exc}"
+        )
+
+
+def test_get_places_frame_returns_empty_and_releases_connection_on_query_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If store.query_places() raises inside the with block, get_places_frame()
+    must still return an empty DataFrame and the connection must be released."""
+    from core.broker import LocalizerBroker
+
+    db_path = tmp_path / "test.duckdb"
+
+    with LocalizerStore(path=db_path) as store:
+        _seed_places(store, n=1)
+
+    def _raise_query_places(self: LocalizerStore, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        raise RuntimeError("simulated query failure")
+
+    monkeypatch.setattr(LocalizerStore, "query_places", _raise_query_places)
+
+    broker = LocalizerBroker(store_path=db_path)
+    result = broker.get_places_frame()
+    assert isinstance(result, pd.DataFrame)
+    assert result.empty
+
+    # Connection must have been released despite the exception.
+    monkeypatch.undo()
+    try:
+        with LocalizerStore(path=db_path) as store2:
+            df = store2.query_places()
+            assert len(df) >= 1
+    except Exception as exc:  # noqa: BLE001
+        pytest.fail(
+            f"Could not re-open DuckDB after get_places_frame() raised — "
+            f"broker may have left connection open: {exc}"
+        )

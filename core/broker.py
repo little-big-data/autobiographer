@@ -245,6 +245,36 @@ class LocalizerBroker:
         """
         return {}
 
+    def get_events_frame(self) -> pd.DataFrame:
+        """Return all event rows from the store, unfiltered by source_id.
+
+        Returns:
+            DataFrame with columns timestamp, label, sublabel, category,
+            source_id, or an empty DataFrame if the store is empty or the
+            query fails.
+        """
+        try:
+            with self._open_store() as store:
+                df = store.query_events()
+            return df
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+
+    def get_places_frame(self) -> pd.DataFrame:
+        """Return all place rows from the store, unfiltered by source_id.
+
+        Returns:
+            DataFrame with columns timestamp, lat, lng, place_name,
+            place_type, source_id, or an empty DataFrame if the store is
+            empty or the query fails.
+        """
+        try:
+            with self._open_store() as store:
+                df = store.query_places()
+            return df
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+
     def get_merged_frame(self, assumptions: dict[str, Any] | None = None) -> pd.DataFrame:
         """Return merged events + places via pandas ASOF JOIN on timestamp.
 
