@@ -1,7 +1,7 @@
 # Handoff
 
 ## Plan Status
-status: IN_PROGRESS
+status: COMPLETE
 
 ## Task Overview
 
@@ -130,7 +130,7 @@ inference from names alone.
 Plan Review: APPROVED — all five design decisions verified line-for-line against core/broker.py, analysis_utils.py, packages/localizer/src/localizer/store/schema.py, db.py, components/sidebar.py, and pages/geo_explorer.py/places.py (column shapes, ASOF-join scope, places-table schema, _make_broker's zero production callers, state/column guards, load_swarm_data's empty-frame columns, and the flythrough error path all match the plan's claims exactly); the 4-subtask DAG is acyclic with current:1 a valid topological order, Files-to-Touch and Test-Files are fully disjoint across subtasks, and every subtask has ≥5 falsifiable, value-level acceptance criteria plus concrete Test Guidance covering edge cases.
 
 ## Current Subtask
-current: 3
+current: 4
 
 ---
 
@@ -503,7 +503,7 @@ the coder already fixed (the unused-import lint issue). Approved; advancing `cur
 
 ### Subtask 3 — Wire the broker + adapters into `components/sidebar.py`
 
-**Status**: RED
+**Status**: APPROVED
 
 **PR Group**: wire-localizer-broker-into-app
 
@@ -624,16 +624,228 @@ CSV-gated path — fixing the actual reported bug. Concretely:
     ImportError` pattern.
 
 **Implementation Notes**:
-(filled by coder agent)
+Implemented the design exactly as specified:
+
+- Added `_broker_store_identity(assumptions_path) -> tuple[str, float, str] | None`
+  in `components/sidebar.py`: mirrors `_make_broker()`'s `try/except ImportError`
+  guard around `from localizer.store.db import LocalizerStore`, returns
+  `(str(store_path), store_path.stat().st_mtime, assumptions_path)` when
+  `store_path.exists()`, else `None`.
+- Added `_load_data_from_broker(assumptions_path)`: instantiates `LocalizerBroker()`
+  (cached in `st.session_state["_broker_instance"]` — see deviation note below),
+  calls `get_events_frame()`/`get_places_frame()`, adapts via
+  `events_to_lastfm_frame()`/`places_to_swarm_frame()`, then calls the existing
+  `apply_swarm_offsets(lastfm_df, swarm_df, assumptions)` — never
+  `get_merged_frame()`. Does not touch `get_cache_key`/`get_cached_data`/
+  `save_to_cache` at all. Sets `st.session_state["_cache_status"] = "n/a"`.
+  Stores the adapted places frame into `swarm_df` and the offset result into
+  `_raw_df`, matching the legacy path's session-state keys.
+- Rewired `render_sidebar()`: computes `broker_identity =
+  _broker_store_identity(assumptions_path)` once per call. When not `None`
+  (broker mode), writes `_current_config = ("", "", assumptions_path, "")` (still
+  a 4-tuple), compares a separate `_loaded_store_identity` session-state key
+  against `broker_identity` to decide whether to skip the reload, and — critically
+  — re-computes and stores `_broker_store_identity(assumptions_path)` **after**
+  the load completes rather than reusing the pre-load value (see deviation note).
+  When `broker_identity` is `None`, falls through to the legacy branch, which is
+  byte-for-byte the prior code, now indented under `else`.
+- Updated the module docstring's session-state contract to document `"n/a"` for
+  `_cache_status` and the new `_loaded_store_identity` key and "Broker mode"
+  section.
+
+Two deviations from the plan's literal description, both discovered empirically
+while making the reload-skip/trigger test pass (`test_render_sidebar_reload_skip_and_trigger_on_store_mtime`):
+
+1. **DuckDB touches the file's mtime merely by opening a connection for a read
+   query** (verified empirically: opening `LocalizerStore` and calling
+   `query_events()` changes `store_path.stat().st_mtime` even with no writes).
+   This means an identity captured *before* triggering a load is stale by the
+   time the next `render_sidebar()` call re-stats the file — every call would
+   see a "changed" mtime and reload again, forever. Fix: `render_sidebar()`
+   re-computes `_broker_store_identity(assumptions_path)` a second time
+   *after* `_load_data_from_broker()` returns, and stores that post-load value
+   as `_loaded_store_identity`, not the pre-load value.
+2. **`LocalizerBroker()`'s constructor itself performs one `query_events()`/
+   `query_places()` call** (via `_refresh_available_types()`, pre-existing
+   Subtask-1-adjacent code, untouched here). Reconstructing a new
+   `LocalizerBroker()` on every reload would therefore add a second,
+   redundant `query_events()` call per reload beyond the one
+   `get_events_frame()` call the test expects (it asserts the query count
+   increases by *exactly* 1 on a genuine mtime-triggered reload). Fix: cache
+   the `LocalizerBroker` instance in `st.session_state["_broker_instance"]`
+   and reuse it across reloads within a session, only re-invoking
+   `get_events_frame()`/`get_places_frame()` on each reload rather than
+   rebuilding the broker.
+
+A third, unplanned fix was required in `tests/test_visualize.py`'s
+`TestSidebarDataLoading` class (4 tests: `test_render_sidebar_sets_df_none_when_no_file_path`,
+`test_render_sidebar_publishes_current_config`,
+`test_render_sidebar_skips_load_when_already_loaded`,
+`test_render_sidebar_loads_when_config_changed`). These pre-existing tests call
+`render_sidebar()` without mocking `LocalizerStore.default_path()` (they predate
+broker-mode wiring and only ever needed to exercise the legacy path). On this
+dev machine, `~/.localizer/store.duckdb` genuinely exists (the user's real
+3,076-row Google Timeline sync mentioned in the Task Overview), so once
+`_broker_store_identity()` became live inside `render_sidebar()`, these 4 tests
+started taking the broker branch for real and crashed on the real (unmocked)
+`streamlit.status()`/`streamlit.columns()` outside an actual Streamlit script
+run (`AttributeError: 'NoneType' object has no attribute 'update'`). This is an
+environment-dependent test-isolation gap, not a logic bug: in a clean CI
+checkout with no local store, these tests would have passed unmodified. Fixed
+by adding `patch("components.sidebar._broker_store_identity", return_value=None)`
+to each of the 4 tests' `with` blocks, forcing the legacy branch deterministically
+regardless of what real data exists on the machine running the suite — matching
+the existing `_FakePath`/`default_path`-mocking convention used elsewhere
+(`tests/test_cutover.py`, `tests/test_sidebar.py`'s new `TestBrokerModeWiring`).
+No assertions in those 4 tests were changed, only the mock setup.
+
+No changes to `core/broker.py` or `core/localizer_frames.py` (Subtasks 1/2,
+already `APPROVED`) — this subtask's diff is confined to `components/sidebar.py`
+and the one deviation fix in `tests/test_visualize.py`.
+
+Verification:
+- `pytest tests/test_sidebar.py -v --no-cov` — 7 passed, 0 failed: the 3
+  pre-existing `TestLoadDataCombination` tests (unchanged, proving the legacy
+  path is untouched) plus the 4 new `TestBrokerModeWiring` tests, all now
+  passing. No regression in the legacy-path test count (3 before, 3 after).
+- `ruff check .` — all checks passed.
+- `ruff format --check .` — 131 files already formatted.
+- `mypy` (unscoped) — Success: no issues found in 15 source files.
+- `pytest --no-cov -q` (full suite) — 862 passed, 0 failed (858 pre-existing +
+  4 flipped `TestBrokerModeWiring` tests to GREEN, matching the plan's expected
+  count exactly; no other regressions after the `test_visualize.py` mock fix).
+
+Environment note: this worktree's editable installs of `localizer` and
+`autobiographer` had drifted to point at the main repo checkout instead of this
+worktree (`pip show localizer` showed `Editable project location:
+C:\Users\johns\Code\autobiographer\packages\localizer`, missing this branch's
+`google_timeline` plugin module and causing a collection-time
+`ModuleNotFoundError`). Re-ran `pip install -e packages/localizer/ && pip
+install -e .` from this worktree's root (per CLAUDE.md's monorepo setup
+instructions) to repoint both editable installs at this worktree before any
+tests could collect.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — full unscoped gate re-run from a clean venv activation: `ruff check .` —
+no issues found; `ruff format --check .` — 131 files already formatted; `mypy` (unscoped) —
+Success, no issues in 15 source files; `pytest tests/test_sidebar.py -v --no-cov` — exactly 7
+passed (3 pre-existing `TestLoadDataCombination` + 4 new `TestBrokerModeWiring`), 0 failed; full
+suite `pytest --no-cov -q` — 862 passed, 0 failed, no regressions, matching the plan's expected
+count exactly.
+
+Independently read `components/sidebar.py` in full and diffed it against the pre-subtask-3 commit
+(`8e9b1b5`, the actual parent — not `main`, which includes unrelated branch history) to isolate
+this subtask's real change: `git diff 8e9b1b5 -- components/sidebar.py` is +150/-17 (the -17 is
+purely the legacy block's re-indentation under the new `else:`; `_load_data_with_progress()`'s own
+body has zero diff hunks inside it — byte-for-byte unchanged, only its position moved). Verified
+against spec:
+- `_current_config` is a 4-tuple in both modes (`("", "", assumptions_path, "")` in broker mode,
+  `(file_path, swarm_dir, assumptions_path, timeline_path)` in legacy mode). Grepped every
+  index-based reader (`pages/places.py:317-320`, `pages/geo_explorer.py:467-470`,
+  `pages/life_in_chapters.py:525-526`, `pages/listening_lifestyle.py:963-964`,
+  `pages/data_sources.py:316-317,460-462`) — all read `_loaded_config` (not `_current_config`,
+  a naming nuance in the plan's prose, not a bug), which `render_sidebar()` also sets to the same
+  4-tuple `current_config` on every successful load in both branches, so index `[0]`/`[1]`/`[2]`
+  reads never raise `IndexError`. `data_sources.py`'s deep-analysis-cache call sites additionally
+  guard with `isinstance(..., dict)` before indexing — pre-existing defensive code, unaffected.
+- Broker mode never calls `get_cache_key`/`get_cached_data`/`save_to_cache` (grepped
+  `core/broker.py` and `_load_data_from_broker()` — those three names appear only inside
+  `_load_data_with_progress()`, the legacy function) and never calls `get_merged_frame()` (uses
+  `get_events_frame()` + `get_places_frame()` + `apply_swarm_offsets()` per Task Overview decision
+  2, confirmed at lines 166-170).
+- `_cache_status` is set to exactly `"n/a"` in broker mode (line 176) and only ever `"hit"`/`"miss"`
+  inside the legacy function — confirmed by the passing
+  `test_cache_status_is_na_literal_in_broker_mode` test and by reading both code paths directly.
+- ImportError fallback: `_broker_store_identity()` wraps `from localizer.store.db import
+  LocalizerStore` in the same `try/except ImportError: pass` shape as the pre-existing
+  `_make_broker()`, returning `None` on failure, which routes `render_sidebar()` straight to the
+  `else` (legacy) branch. Confirmed by inspection this is correct. Confirmed the gap is
+  intentionally undocumented by a standalone test — `tests/test_sidebar.py`'s
+  `TestBrokerModeWiring` docstring explains why (no live import site existed pre-subtask-3 for an
+  `ImportError` to interrupt). This is a real but narrow, low-value-to-close coverage gap (the code
+  path mirrors an already-tested pattern verbatim); flagging it here rather than blocking on it.
+- Scrutinized both empirically-discovered deviations against `core/broker.py`'s actual
+  implementation (lines 153-276): `get_events_frame()`/`get_places_frame()` each open a **fresh**
+  `self._open_store()` connection and re-query on every call — caching the `LocalizerBroker`
+  instance in session state does *not* cache the event/place data itself, only the broker object's
+  `_store_path`/`_available_types` bookkeeping (set once by `_refresh_available_types()` in
+  `__init__`, unused by the sidebar wiring). So deviation 2 carries no staleness risk — every
+  reload still issues a live query against the current file state. Deviation 1 (capturing
+  `_loaded_store_identity` post-load rather than pre-load) is the *correct* fix, not a workaround: capturing pre-load would cause every subsequent call to see a perpetually "changed" mtime (since
+  opening the store for the load itself bumps mtime) and reload forever; post-load capture is the
+  only way to make the existing mtime-based skip mechanism (Task Overview decision 5, unchanged by
+  this subtask) actually stabilize. Both are reasonable, well-reasoned responses to real,
+  verified environment behavior, not masks of latent bugs.
+- Verified the `tests/test_visualize.py` patch is narrowly scoped: `git diff 8e9b1b5 --
+  tests/test_visualize.py` is exactly `+13/-0` — four additions of
+  `patch("components.sidebar._broker_store_identity", return_value=None)` inside
+  `TestSidebarDataLoading`'s four pre-existing tests, zero assertion changes, zero other edits.
+  This forces the legacy branch deterministically regardless of this dev machine's real
+  `~/.localizer/store.duckdb`, which is a legitimate environment-isolation fix, not a weakening of
+  what those tests verify.
+- Confirmed `tests/test_sidebar.py`'s `TestLoadDataCombination` class is untouched:
+  `git diff 8e9b1b5 -- tests/test_sidebar.py` is `+211/-0` (purely additive: new imports plus the
+  new `TestBrokerModeWiring` class) — no deletions, renames, or weakened assertions in the 3
+  pre-existing legacy-path tests.
+
+No correctness issues found. Design holds up under independent re-derivation of both deviations.
+Status remains GREEN; owner may advance.
+
+Owner Review: APPROVED — independently read `components/sidebar.py` in full (all 379 lines) and
+cross-checked against Subtask 3's Description/Acceptance Criteria. Confirmed: (1) the broker/legacy
+branch in `render_sidebar()` is a single clean `if broker_identity is not None: ... else: ...` with
+no logic duplicated between the two branches beyond the unavoidable "compute config tuple → store
+it → check already_loaded → load if needed" shape, which differs enough between the two paths
+(different reload-identity source, different session-state keys, different cache semantics) to
+justify not being unified into one code path — forcing a shared abstraction here would trade clarity
+for cleverness, contrary to CLAUDE.md's Core Philosophy. (2) `_current_config` is written as a
+4-tuple in both branches (`("", "", assumptions_path, "")` broker / `(file_path, swarm_dir,
+assumptions_path, timeline_path)` legacy), satisfying the index-based-reader contract. (3) Docstrings
+are Google-style, present on every new/changed function (`_broker_store_identity`,
+`_load_data_from_broker`), and the module docstring (lines 1-45) was genuinely updated with a new
+"Broker mode" section and `_loaded_store_identity` contract entry — not just left stale. Type hints
+are complete and precise (`tuple[str, float, str] | None`).
+
+One real but non-blocking observation: `_broker_store_identity()` re-implements the same
+`try: from localizer.store.db import LocalizerStore; ... except ImportError: pass` /
+`store_path.exists()` shape already present in `_make_broker()` (lines 73-95), and `_make_broker()`
+itself remains dead code in production (grepped the full repo — its only callers are
+`tests/test_cutover.py` and `tests/test_localizer_broker.py`; still zero production call sites after
+this subtask, same as before). This is ~5 lines of duplicated guard logic, not a correctness issue,
+and the plan's own Subtask 3 description explicitly directs adding a *new* helper
+(`_broker_store_identity`) rather than reusing `_make_broker()` — reasonable, since `_make_broker()`
+returns a broker instance while the wiring needs a plain identity tuple for reload-detection, a
+different return shape. Consolidating the two would be a legitimate future cleanup (e.g. extracting
+the existence-check into a shared `_store_path_if_exists()` helper) but is out of this subtask's
+scope and not worth blocking APPROVED status over — flagging for a future pass, not sending back.
+
+ImportError-fallback test-coverage gap: accepted as-is, not sent back for a test. Reasoning: (a) the
+exact same guard shape has shipped untested in `_make_broker()` since before this plan with no
+incident, so there is direct in-repo precedent for accepting inspection-level confidence on this
+narrow defensive branch; (b) the branch is three lines with no computation — `try: import X; use X
+except ImportError: pass` — where the only way to falsify it would be to monkeypatch Python's import
+machinery (e.g. `sys.modules` poisoning) for marginal assurance beyond what two independent code
+reads have already confirmed; (c) both the automated reviewer and this owner review independently
+traced the control flow by inspection and confirmed `_broker_store_identity()` returning `None` on
+`ImportError` correctly routes `render_sidebar()` to the legacy `else` branch. Net: real but narrow
+gap, consistent with existing repo precedent, not worth the disproportionate test-authoring effort
+for this pass.
+
+Verified full-suite result reported by the reviewer (862 passed, 0 failed) is consistent with the
+diff scope reviewed; per instructions, did not re-run the suite myself.
+
+Ready to precede Subtask 4: Subtask 3 is the last blocking dependency for Subtask 4 (`Depends On: 3`),
+whose tester previously HALTed specifically pending this APPROVED status. No outstanding concerns
+that would require revisiting Subtask 3 once Subtask 4's integration test and manual verification are
+underway.
+
+Subtask 3 Status: APPROVED. Advancing `current` to 4.
 
 ---
 
 ### Subtask 4 — End-to-end integration test and manual visual verification
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: wire-localizer-broker-into-app
 
@@ -700,20 +912,239 @@ on a map page.
   skip it).
 
 **Test Files**:
-HALT (test-ahead phase) — tester correctly declined to write a forced/fragile RED test. Reason:
-Subtask 4's Test Guidance explicitly forbids mocking `LocalizerBroker`, `core.localizer_frames`,
-or `LocalizerStore` (the whole point is exercising the real Subtask 1-3 composition), but none of
-that composition exists yet — `core/broker.py` has no `get_events_frame`/`get_places_frame`,
-`core/localizer_frames.py` doesn't exist, and `components/sidebar.py` has no broker-mode branch.
-A test written now would either fail for the wrong reason (the unmodified legacy early-return
-path, not the intended broker composition) or duplicate Subtask 1/2's own isolated tests without
-covering the actual integration surface. **Re-run the tester for Subtask 4 once Subtask 3 reaches
-`APPROVED`.** Left at `Status: NEW` per this halt.
+`tests/test_sidebar_broker_integration.py` (new) — re-run by the tester now that Subtasks 1-3 are
+`APPROVED` (the earlier halt above no longer applies). No mocking of `LocalizerBroker`,
+`core.localizer_frames`, or `LocalizerStore` — only `streamlit` (`st`) is a `MagicMock`, matching
+`tests/test_sidebar.py`'s convention. Seeds a real `tmp_path`-scoped DuckDB store via
+`LocalizerStore.upsert_events`/`upsert_places`, reusing `_seed_events`/`_seed_places` imported
+directly from `tests/test_localizer_broker.py`. `TestSidebarBrokerIntegration`, 3 tests:
+- `test_df_populated_with_seeded_event_values` — seeds 2 `lastfm` events + 2 `google_timeline`
+  places, calls the real `render_sidebar()`, asserts `session_state["df"]` has exactly 2 rows,
+  contains `"Artist0"`/`"Artist1"` in `artist` and `"Track0"`/`"Track1"` in `track`, non-null
+  `lat`/`lng` on every row.
+- `test_swarm_df_populated_with_seeded_place_values` — asserts `session_state["swarm_df"]` has
+  exactly 2 rows, `"Place0"`/`"Place1"` in `city`, and the exact seeded `(51.5074, -0.1278)`
+  lat/lng pair for Place0 survives the broker → adapter → session_state round-trip.
+- `test_date_text_is_genuine_usable_datetime64_column` — asserts `df["date_text"].dtype.kind ==
+  "M"` and that `.dt.date` (the exact operation `render_sidebar()`'s own date-filter widget
+  performs) works without raising.
+
+**Outcome — not a RED state**: all 3 tests passed immediately on first run against the real
+Subtask 1-3 implementations (no code changes needed to make them pass); `ruff check` on the new
+file is clean. Per the tester's report, assertions were not weakened to force a failure — this
+demonstrates the real composition (`get_events_frame`/`get_places_frame` → adapters →
+`apply_swarm_offsets` → session_state) is correct end-to-end, and the test file now serves as a
+regression guard rather than a RED-then-GREEN test. Status set directly to `GREEN` (skipping RED)
+to reflect this. The coder's remaining job for this subtask is the **manual verification**
+acceptance criteria (visual check of the running app, flythrough graceful-degradation check),
+the module-docstring update called out in Test Guidance, and a final full-suite regression run —
+none of which are covered by the automated test file above.
 
 **Implementation Notes**:
-(filled by coder agent)
+
+**Store state**: `~/.localizer/store.duckdb` was already populated on this dev machine — no
+`localizer sync`/`localizer fetch` needed. Confirmed via
+`LocalizerStore.default_path()` → `C:\Users\johns\.localizer\store.duckdb`, `.exists()` → `True`.
+Row counts confirmed directly against the store: `query_places(source_id="google_timeline")` →
+3,076 rows (matches the task description exactly); `LocalizerBroker().get_places_frame()` → 10,905
+rows total (7,829 `swarm` + 3,076 `google_timeline`); `LocalizerBroker().get_events_frame()` →
+290,392 rows, all `source_id="lastfm"`. Also re-confirmed the editable-install fix from Subtask 3
+is still intact in this session: `import localizer` resolves to
+`.../agent-adb530a22a6adcac5/packages/localizer/src/localizer` (this worktree), not the main
+checkout.
+
+**The `>=1 lastfm event` question, resolved**: this store has 290,392 real `lastfm` events, so
+`_raw_df`/`df` populate normally through `apply_swarm_offsets` — the zero-lastfm-events
+degradation scenario flagged in the task prompt does not apply on this machine. Ran the adapter
+pipeline directly (`get_events_frame` → `events_to_lastfm_frame`, `get_places_frame` →
+`places_to_swarm_frame`, then `apply_swarm_offsets`) outside of Streamlit to get a value-level
+fix on what the map actually plots: `raw_df` has 290,392 rows and 3,548 unique `(lat, lng)` pairs;
+1,421 of those unique pairs come from `google_timeline` places; **838 of the unique points that
+actually appear in `raw_df` (the scrobble-map data) are `google_timeline`-sourced points** — i.e.
+Google Timeline data measurably changes what renders on the map, not just what's nominally in the
+store.
+
+**Which page(s) I checked, and why**: investigated both candidates named in the task.
+`pages/geo_explorer.py::render_geo_explorer()` reads **both** `df` (`music_df`, scrobbles) and
+`swarm_df` (`has_swarm` gate) and plots both as layers — this is the primary "map" page and the
+one the task's own Acceptance Criteria point at. `pages/places.py::render_checkin_insights()`
+("Check-in Insights" in the nav — labeled "Places" in code comments but not in the UI) reads
+`swarm_df` directly and is the more direct consumer of adapted `google_timeline` place data,
+since `google_timeline` never appears in `df`/events at all (it's places-only, no lastfm overlap
+by source). Checked both:
+- **Geo Explorer, 2D Map view** (default): "Listening locations" scrobble map rendered with
+  13,168 locations, 77,886 total plays, Top City "Laurel, MD (APL)". Both `Scrobbles` and
+  `Check-ins` data-layer pills were active by default in the Filter popover (`available_layers`
+  includes `"Check-ins"` since `has_swarm` is true).
+- **Geo Explorer, 3D Globe view**: stat row showed "Scrobble Locations: 4,972", "Total Scrobbles
+  (mapped): 290,392" (exact match to the `raw_df` row count computed independently above), and
+  **"Check-in Locations: 8,806"** — a real, non-zero count of place markers rendered, sourced from
+  `swarm_df` (which is `swarm` + `google_timeline` combined).
+- **Check-in Insights page** (reads `swarm_df` only, no scrobble data at all): "Check-ins across 1
+  countries" showed **10,905** — an exact match to `get_places_frame()`'s total unfiltered row
+  count (7,829 swarm + 3,076 google_timeline). The "Top 20 cities" bar chart's top two entries
+  were **"In passenger vehicle"** and **"Home"** — these are literally Google Timeline's
+  `place_type`/`place_name` activity labels (e.g. `activity:in_passenger_vehicle`, `home`) flowing
+  through `places_to_swarm_frame()`'s `place_name→city` rename and appearing as top-ranked "cities"
+  on a real rendered page. This is unambiguous, page-level, non-synthetic proof that Google
+  Timeline data specifically (not just Swarm) is present and visible on rendered UI — and it's a
+  live instance of Task Overview decision 1's already-accepted limitation (activity labels are not
+  administrative city names), observed for real rather than just reasoned about.
+
+**View mode used**: both 2D Map and 3D Globe were checked (see above); 2D Map is the default. Both
+render check-in/place data alongside scrobbles. Points genuinely appeared in both.
+
+**How I drove the app**: `chromium-cli` was not available in this environment (`which chromium-cli`
+found nothing). This repo already depends on `playwright` (used by `record_flythrough.py` itself,
+declared in `pyproject.toml`) and had Chromium already installed for it, so I used Playwright
+directly — a first-party tool already in this project's dependency tree, not a new one — to drive
+a real headless Chromium session against `streamlit run visualize.py --server.headless true
+--server.port 8501`, navigate the actual page-nav links, click the actual segmented-control/filter
+widgets, and take full-page screenshots at each step. `console` "error"-type messages and
+`pageerror` events were captured for the whole session. This was genuine browser-level visual
+verification, not a Python-level session_state inspection substitute (though I also did the
+latter, independently, to get exact adapter-level numbers — see above). The one-off driver script
+and all screenshots were deleted after use; they were not committed (`git status --short` after
+cleanup shows only the expected source/test files, confirmed clean).
+
+**Console errors observed (pre-existing, unrelated to this plan)**: switching to the 3D Globe view
+logged two `deck: loading data of GeoJsonLayer(...)` console errors — `Unexpected token '<' ...
+SyntaxError: is not valid JSON` — consistent with a country/state boundary GeoJSON fetch getting an
+HTML (likely 404) response back instead of JSON in this environment. This is unrelated to
+`google_timeline`/broker-mode data (it's an overlay-boundary asset fetch, not scrobble/check-in
+data) and did not prevent the scrobble/check-in layers themselves from rendering with correct
+counts — flagging for awareness, not treating as a Subtask 4 blocker since it's outside this plan's
+files-to-touch and pre-dates this work.
+
+**Flythrough graceful-degradation check — result differs from the plan's prediction, in a way
+worth flagging but not blocking on**: clicked "▶ Record Flythrough" on the Geo Explorer 3D Globe
+view in the same broker-mode session (no legacy CSV/Swarm/Timeline paths configured).
+**The app did not crash** — confirmed the page remained fully interactive and responsive
+immediately after the click (all controls still clickable, no Python traceback, no blank/500
+page). However, the *specific* degradation differs from what Task Overview's documented limitation
+predicted: instead of `rec_status.update(label="Recording failed...", state="error")`, the widget
+showed **"Recording saved to: flythrough_<timestamp>.mp4"** (a false-positive success message) —
+and no such file was actually created on disk (`ls` confirmed). Root cause, traced by reading
+`record_flythrough.py`: `geo_explorer.py` passes `csv_path=""` (falsy) in broker mode, so
+`cmd` omits the positional csv argument entirely; `record_flythrough.py`'s own `main()` has a
+**pre-existing, independent fallback**: when no csv is given, `create_recording_assets()` searches
+`os.getenv("AUTOBIO_LASTFM_DATA_DIR", "data")` for a `*_tracks.csv` file (this worktree's `data/`
+dir has none — only `.gitkeep`), and when neither the file nor the fallback dir/file exists, it
+returns `(None, None)`. `main()`'s handling of that result — `if result is None: return` (never
+true, since `(None, None)` is a 2-tuple, not `None`) then `deck, keyframes = result; if not deck:
+return` — exits with return code 0 and prints nothing, so the subprocess's exit code alone (which
+`geo_explorer.py` uses to decide success vs failure) reports success even though nothing was
+recorded. **This is a pre-existing bug in `record_flythrough.py`'s `main()`, not something
+introduced by Subtasks 1-4** — it would reproduce identically today on `main` in the legacy path
+too, any time `create_recording_assets()` returns `(None, None)` for *any* reason (missing CSV,
+empty data dir, etc.), independent of broker mode. It is also explicitly out of this plan's scope
+per Task Overview ("Files never touched by this plan" lists `record_flythrough.py`). Net: the
+*required* acceptance criterion — the app does not crash — is satisfied; the *literal wording*
+about "an error is shown" is not, because the real failure mode is a silent false-positive success
+message rather than a visible error. Not fixing this (out of scope, pre-existing, no crash), but
+flagging clearly per instructions rather than silently treating the AC as fully met: **recommend a
+follow-up issue against `record_flythrough.py`'s `main()` to check `os.path.exists(args.output)`
+before reporting success, independent of this plan.**
+
+**Full-suite regression run**: `pytest --no-cov -q` (plain pytest collected normally — the
+documented `rtk proxy` fallback for "No tests collected" was not needed) — **865 passed, 0
+failed** (862 pre-existing + 3 new `TestSidebarBrokerIntegration` tests from this subtask, already
+GREEN per the tester's report — no regressions from the manual-verification work, which touched no
+source files, only a one-off script deleted before this run).
+
+No source files were modified for this subtask beyond what Subtasks 1-3 already delivered — the
+work here was verification only (per the Description's split: automated integration test already
+GREEN from the tester; this pass covered the remaining manual/non-automatable acceptance criteria).
+`components/sidebar.py`'s module docstring (Test Guidance's documentation-upkeep item) was already
+updated during Subtask 3 (verified: the "Broker mode" section and `_loaded_store_identity` session-
+state contract entry are both present at lines 1-45) — no further edit needed here.
+
+Status left at `GREEN` (not flipped to `APPROVED` — that's the owner's call) since no bug was found
+in the code delivered by this plan; the one real finding (record_flythrough.py's silent
+false-success) is a pre-existing, out-of-scope issue, not a defect in Subtasks 1-4's deliverable.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — full unscoped gate re-run from a clean venv activation: `ruff check .` —
+no issues found; `ruff format --check .` — 132 files already formatted; `mypy` (unscoped) —
+Success, no issues found; `pytest tests/test_sidebar_broker_integration.py -v --no-cov` — 3
+passed, 0 failed; full suite `rtk proxy python -m pytest --no-cov -q` — 865 passed, 0 failed (the
+plain `pytest` invocation hit the documented "No tests collected" rtk-hook quirk, so the `rtk
+proxy` fallback was used, matching the coder's own note that this fallback exists for that reason).
+
+Read `tests/test_sidebar_broker_integration.py` in full and cross-checked its assertions against
+`tests/test_localizer_broker.py`'s `_seed_events`/`_seed_places` helpers: `_seed_events` produces
+`label="Artist{i}"`/`sublabel="Track{i}"`, and `_seed_places` produces `place_name="Place{i}"` with
+`lat=51.5074 + i*0.01`/`lng=-0.1278 + i*0.01` — so Place0 is exactly `(51.5074, -0.1278)`, the
+literal pair the test asserts appears in `swarm_df[["lat", "lng"]]`. All three tests assert
+specific values (`"Artist0"`/`"Artist1"` in `artist`, `"Track0"`/`"Track1"` in `track`, the exact
+`(51.5074, -0.1278)` tuple, `date_text.dtype.kind == "M"` plus a working `.dt.date` call) rather
+than shape/presence checks — satisfies Subtask 4's Test Guidance directive to assert on values, not
+just column existence.
+
+Independently re-derived the row-count claims in Implementation Notes against the real
+`~/.localizer/store.duckdb` rather than trusting them: ran
+`LocalizerBroker().get_places_frame()`/`get_events_frame()` directly — got `places` = 10,905 total
+(7,829 `swarm` + 3,076 `google_timeline`) and `events` = 290,392 (all `lastfm`), an exact match to
+every number cited in Implementation Notes (the "10,905"/"7,829 swarm + 3,076 google_timeline" page
+count on Check-in Insights, the "290,392" scrobble count on the 3D Globe stat row, and the task's
+own "3,076 google_timeline rows" premise). The numbers are internally consistent and independently
+reproducible, not fabricated or misremembered.
+
+**Flythrough finding, scrutinized**: read `record_flythrough.py` in full. Confirmed the root-cause
+diagnosis is accurate: `main()`'s `result = create_recording_assets(...)` can return the 2-tuple
+`(None, None)` (lines 213/215/226/243 of `create_recording_assets`), so `if result is None: return`
+(line 455) never fires for that case; `deck, keyframes = result` unpacks to `(None, None)`, and
+`if not deck: return` (line 458) exits silently with code 0 and no printed output — meaning
+`pages/geo_explorer.py`'s `if proc.returncode == 0: rec_status.update(label=f"Recording saved to:
+{out_path}", state="complete")` (geo_explorer.py:503-504) reports false success. Confirmed via
+`git diff 8e9b1b5 -- record_flythrough.py` → empty diff: this file has zero changes on this branch,
+so the bug is not introduced by Subtasks 1-4. Confirmed `csv_path=""` in broker mode is itself
+expected, documented behavior — `geo_explorer.py:468`, `csv_path = loaded_config[0] if
+loaded_config else None`, and Task Overview's own "Explicit out-of-scope limitation" paragraph
+states index 0 is deliberately set to `""` in broker mode. The bug is a pure result-unpacking defect
+inside `main()` that reproduces identically in legacy mode any time `create_recording_assets()`
+returns `(None, None)` for any reason (e.g. a `data/` dir with no `*_tracks.csv`, independent of
+broker mode) — confirmed by reading `create_recording_assets()`'s four `return None, None` sites,
+none of which are broker-mode-specific. Root-cause diagnosis and pre-existing/out-of-scope framing
+both hold up under independent re-derivation.
+
+**Severity assessment**: the required acceptance criterion — "does not crash the Streamlit app" —
+is genuinely satisfied (confirmed via the coder's Playwright-driven check and the code reading
+above: the exception never propagates past `main()`, so the subprocess just exits 0 with no
+output). The *literal wording* of "an error is shown" is not satisfied — the real behavior is a
+misleading false-positive success message. This is a legitimate UX bug (a user could believe a
+video was saved when it wasn't) that is one severity notch worse than the plan's original
+prediction, but it does not rise to a defect in Subtask 4's own deliverables: the automated test
+file's claims are accurate, and Implementation Notes describe the actual observed behavior
+precisely rather than glossing over the mismatch with the plan's prediction. Recommend the
+orchestrator/owner have a follow-up GitHub issue filed against `record_flythrough.py::main()`
+(check `os.path.exists(args.output)`, or equivalently treat a `(None, None)` result as a nonzero
+exit code, before reporting success) — this is a judgment call for the orchestrator/owner, not a
+blocker on Subtask 4.
+
+No defects found in Subtask 4's own deliverables (test file or Implementation Notes claims).
+Status remains GREEN; owner may advance.
+
+**Owner Review**: APPROVED. The deliverable genuinely satisfies the user's original ask: independent
+browser-driven verification (Playwright) against the real populated store confirms Google Timeline
+data renders on live pages, with exact row-count cross-checks against the live DuckDB store and
+unambiguous evidence (Google Timeline's own activity labels appearing on-screen). Gate is clean
+(865/865). The record_flythrough.py false-success finding is accepted as a pre-existing,
+out-of-scope bug (confirmed via `git diff` showing zero changes to that file on this branch, and
+Task Overview explicitly lists it as never touched by this plan) — shipping with a documented
+follow-up recommendation rather than blocking on it, since the plan's actual scope (wiring
+LocalizerBroker into the app) is fully and correctly delivered. Recommend the orchestrator open a
+follow-up GitHub issue against `record_flythrough.py::main()`'s silent-false-success bug after this
+plan's PR is merged.
+
+**Plan-wide loose ends for the orchestrator's final commit/PR step**: PR #113 already merged
+Subtasks 1-2 (`localizer-broker-frame-adapters` PR group). Subtasks 3-4 (`wire-localizer-broker-into-app`
+PR group) are both now APPROVED but not yet committed or PR'd — `components/sidebar.py`,
+`tests/test_sidebar.py`, `tests/test_visualize.py`, and the new `tests/test_sidebar_broker_integration.py`
+are all still uncommitted in the worktree. All 4 subtasks across both PR groups are now APPROVED;
+`Plan Status` is being set to `COMPLETE` below. Next step: full-suite integration gate (already
+confirmed 865/865 clean), commit this second PR group, open its PR, and spawn the polisher.
+
+Status: APPROVED. Plan Status: COMPLETE.
 
 ---
