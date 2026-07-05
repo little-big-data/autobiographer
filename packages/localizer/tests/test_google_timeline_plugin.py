@@ -491,3 +491,48 @@ def test_explicit_path_overrides_settings(tmp_path: Path, monkeypatch: pytest.Mo
     plugin = GoogleTimelinePlugin(timeline_path=timeline_path)
     records = list(plugin.fetch_records())
     assert len(records) == 2, "Explicit timeline_path must override the settings-derived value"
+
+
+# ---------------------------------------------------------------------------
+# Subtask 2 — fetch_records() must not depend on analysis_utils being
+# importable (the installed console-script entry point has no access to the
+# top-level app's sys.path, so a lazy `from analysis_utils import ...` inside
+# fetch_records() breaks it in production even though it "works" under
+# pytest, which injects the repo root via pythonpath).
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_records_does_not_require_analysis_utils_importable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fetch_records() must not raise if `analysis_utils` cannot be imported.
+
+    Forces `sys.modules["analysis_utils"] = None`, which makes any
+    `from analysis_utils import ...` raise
+    `ImportError: import of analysis_utils halted; None in sys.modules` -
+    simulating the real installed-console-script failure mode where
+    `analysis_utils.py` (a bare top-level module, not part of any installed
+    package) is not on `sys.path` at all.
+
+    Pre-fix, loader.py's fetch_records() does a lazy
+    `from analysis_utils import load_google_timeline`, so this test fails
+    with that exact ImportError. Post-fix, the plugin must import its parser
+    from `localizer.plugins.google_timeline.parser` instead, which has no
+    dependency on `analysis_utils` being importable.
+    """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "analysis_utils", None)
+
+    from localizer.plugins.google_timeline.loader import GoogleTimelinePlugin
+
+    timeline_path = _write_timeline(
+        tmp_path / "Timeline.json", _timeline_payload_with_visit_and_activity()
+    )
+
+    plugin = GoogleTimelinePlugin(timeline_path=timeline_path)
+    records = list(plugin.fetch_records())
+    assert len(records) > 0, (
+        "Expected fetch_records() to yield records even when analysis_utils "
+        "cannot be imported - it must not depend on that module at runtime"
+    )

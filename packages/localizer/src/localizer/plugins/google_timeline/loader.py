@@ -2,11 +2,12 @@
 
 FetchMode.MANUAL — the user must export a ``Timeline.json`` file from their
 device or Google Takeout and point the plugin at it. Wraps
-``analysis_utils.load_google_timeline()`` (the existing parser, already
-tested in ``tests/test_google_timeline.py``) and yields ``OutputTable.PLACES``
-records using that parser's ``venue``/``venue_category`` values verbatim as
-``place_name``/``place_type`` — no new parsing or mapping logic is invented
-here (mirrors ``plugins/sources/google_timeline/loader.py`` lines 76-80).
+``localizer.plugins.google_timeline.parser.load_google_timeline()`` (the
+existing parser, already tested in ``tests/test_google_timeline_parser.py``)
+and yields ``OutputTable.PLACES`` records using that parser's
+``venue``/``venue_category`` values verbatim as ``place_name``/``place_type``
+— no new parsing or mapping logic is invented here (mirrors
+``plugins/sources/google_timeline/loader.py`` lines 76-80).
 """
 
 from __future__ import annotations
@@ -91,8 +92,9 @@ class GoogleTimelinePlugin(SourcePlugin):
         """Yield normalized place dicts from a Google Timeline JSON export.
 
         Reads and parses ``Timeline.json`` via
-        ``analysis_utils.load_google_timeline()``, then yields one dict per
-        visit/activity segment. Missing configuration or a nonexistent file
+        ``localizer.plugins.google_timeline.parser.load_google_timeline()``,
+        then yields one dict per visit/activity segment. Missing
+        configuration or a nonexistent file
         yields nothing gracefully (the parser already returns an empty
         DataFrame in that case). An unsupported/legacy-format file causes the
         parser's ``ValueError`` to be translated to ``OSError`` so the
@@ -114,7 +116,9 @@ class GoogleTimelinePlugin(SourcePlugin):
         if not self._timeline_path:
             return
 
-        from analysis_utils import load_google_timeline  # noqa: PLC0415
+        from localizer.plugins.google_timeline.parser import (  # noqa: PLC0415
+            load_google_timeline,
+        )
 
         try:
             df = load_google_timeline(self._timeline_path)
