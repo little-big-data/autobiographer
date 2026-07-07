@@ -14,7 +14,9 @@ Session state contract
                         that ``_raw_df`` is current for this config.
 ``_raw_df``          : unfiltered merged DataFrame (Last.fm + location offsets).
 ``swarm_df``         : combined location DataFrame (Swarm checkins + Google Timeline
-                        visits/activities), sorted by timestamp, or None.
+                        visits/activities), sorted by timestamp, or None. Each row
+                        carries a ``source_id`` of ``"swarm"`` or ``"google_timeline"``
+                        identifying which loader produced it.
 ``df``               : date-filtered view of ``_raw_df`` for the active session.
 ``_cache_status``    : ``"hit"`` or ``"miss"`` for the legacy file-hash cache, or
                         ``"n/a"`` when data was loaded from the DuckDB store (see
@@ -256,6 +258,8 @@ def _load_data_with_progress(
             if swarm_dir and os.path.exists(swarm_dir):
                 st.write("Loading location data…")
                 swarm_df = load_swarm_data(swarm_dir)
+                if not swarm_df.empty:
+                    swarm_df["source_id"] = "swarm"
             else:
                 swarm_df = pd.DataFrame()
 
@@ -265,6 +269,7 @@ def _load_data_with_progress(
                 st.write("Loading Google Timeline data…")
                 timeline_df = load_google_timeline(timeline_path)
                 if not timeline_df.empty:
+                    timeline_df["source_id"] = "google_timeline"
                     swarm_df = pd.concat([swarm_df, timeline_df], ignore_index=True)
                     # Re-sort: apply_swarm_offsets relies on ascending timestamps.
                     swarm_df = swarm_df.sort_values("timestamp").reset_index(drop=True)

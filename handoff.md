@@ -1,1150 +1,763 @@
 # Handoff
 
 ## Plan Status
-status: COMPLETE
+status: IN_PROGRESS
 
 ## Task Overview
 
-**The problem**: the user ran `localizer fetch google_timeline`, which correctly wrote 3,076
-`google_timeline` rows into `~/.localizer/store.duckdb`'s `places` table (confirmed via
-`LocalizerStore().query_places(source_id="google_timeline")`). But the Streamlit app's map/geo
-pages never show this data. Root cause, confirmed by reading the code: `core/broker.py`'s
-`LocalizerBroker` (DuckDB-backed, fully unit-tested in isolation) is never actually called from the
-live data-loading path. `components/sidebar.py::_make_broker()` exists and correctly chooses
-`LocalizerBroker` vs `DataBroker`, but its only callers are test files — `render_sidebar()` and
-`_load_data_with_progress()` call `load_listening_data()` / `load_swarm_data()` /
-`load_google_timeline()` directly against legacy REGISTRY-driven file-path config, and gate the
-entire load on a Last.fm CSV file existing on disk. When only the DuckDB store is populated (no CSV
-configured), `render_sidebar()` bails out immediately and `st.session_state["df"]` /
-`["swarm_df"]` are never populated from the store at all.
+**The problem**: `~/.localizer/store.duckdb`'s `places` table has a `source_id` column
+distinguishing `swarm` (Foursquare/Swarm check-ins, 7,829 rows) from `google_timeline` (Google
+Maps Timeline, 3,076 rows) — but `core/localizer_frames.py::places_to_swarm_frame()` drops
+`source_id` when adapting the broker's raw places frame into the legacy `swarm_df` shape used
+throughout the app. The legacy flat-file loading path (`components/sidebar.py`) has the same gap:
+it concatenates Swarm and Google Timeline rows with no source tag at all. Once data reaches
+`swarm_df`, there is no way to tell which source a given point came from, and no UI lets the user
+isolate one. Google Timeline rows currently populate `venue`/`city` with activity-segment labels
+(`home`, `work`, `activity:in_bus`, etc.) rather than real venue categories, so the two sources look
+visibly different today, but there is no filter control.
 
-**The fix**: make `render_sidebar()` branch into a DuckDB-backed load path when
-`~/.localizer/store.duckdb` exists (reusing `_make_broker()`'s existing "opt-in when store exists"
-selection logic, which is currently correct but dead code), adapt the broker's generic
-events/places schema into the exact column shapes the rest of the app already depends on, and run
-the existing `apply_swarm_offsets()` timezone/location-assumption logic on top — mirroring how
-`DataBroker.get_merged_frame()` itself works today (it calls `apply_swarm_offsets`, not a raw join).
+**The fix**, four parts:
 
-**Five design decisions**, resolved by reading `core/broker.py`, `analysis_utils.py`,
-`packages/localizer/src/localizer/store/db.py`, and every localizer plugin's `fetch_records()`
-in full:
+1. **Preserve `source_id` through the broker (DuckDB) pipeline** — extend `SWARM_COLUMNS` in
+   `core/localizer_frames.py` and stop dropping `source_id` in `places_to_swarm_frame()`
+   (Subtask 1).
+2. **Preserve `source_id` through the legacy flat-file pipeline** — tag rows with `"swarm"` /
+   `"google_timeline"` at the point `components/sidebar.py::_load_data_with_progress()` calls
+   `load_swarm_data()` / `load_google_timeline()`, immediately before the existing
+   `pd.concat()` (Subtask 2).
+3. **A shared, pure, Streamlit-free filtering helper** (`core/source_filter.py`) that computes
+   selectbox options from whatever `source_id` values are present (or gracefully falls back to a
+   single `"All"` option when the column is absent or empty) and filters a `swarm_df` by a chosen
+   label. This mirrors `core/localizer_frames.py`'s existing pure-adapter convention and avoids
+   duplicating source→label mapping logic across the two consuming pages (Subtask 3).
+4. **Wire a `st.selectbox("Source", …)` widget into `pages/geo_explorer.py`** (inside the existing
+   "⚡ Filter" popover, alongside the Artist selectbox) and **into `pages/places.py`'s
+   `render_checkin_insights()`** (the "Check-in Insights" page — confirmed via `visualize.py` line
+   163, which registers `render_checkin_insights` under the page title "Check-in Insights"),
+   filtering `swarm_df` before it reaches map plotting, aggregation, or the shareable HTML export
+   in both pages (Subtasks 4 and 5).
 
-1. **Column/shape parity — the highest-risk finding.** `LocalizerBroker.get_merged_frame()`
-   returns generic columns (`timestamp, label, sublabel, category, source_id, lat, lng,
-   place_name, place_type`) via a plain ASOF join — completely different from what
-   `st.session_state["_raw_df"]` (produced by `apply_swarm_offsets`) and `["swarm_df"]` (produced
-   by `load_swarm_data`) contain today: `artist, track, album, date_text, city, state, country,
-   lat, lng, tz_offset_min` and `timestamp, offset, city, state, country, venue, venue_category,
-   lat, lng, event_category, shout` respectively. Worse: the DuckDB `places` table schema
-   (`SELECT timestamp, lat, lng, place_name, place_type, source_id FROM places`) has **no
-   structured city/state/country columns at all** — `place_name` is a venue/label name (e.g. a
-   Swarm business name, or a Google Timeline semantic label like "Home"/"Work"), not an
-   administrative city name. The old `load_swarm_data()` got city/state/country either from
-   Swarm's `venue.location` fields or by reverse-geocoding lat/lng — neither of which
-   `SwarmPlugin.fetch_records()` in the localizer package currently preserves or performs.
-   **Resolution**: do not attempt reverse-geocoding in this plan (that is a real gap in the
-   localizer Swarm/Timeline ingestion layer, called out below as an explicit out-of-scope
-   limitation, not silently worked around). Instead, build a small, pure adapter module
-   (`core/localizer_frames.py`, Subtask 2) that renames the broker's generic columns into the
-   app's expected names (`label→artist`, `sublabel→track`, `category→album`, `place_name→city`
-   *and* `venue`, `place_type→venue_category`) and fills `state`/`country` with `""` and
-   `offset` with `0` when not derivable. This is safe because every page that reads `state`,
-   `country`, or `tz_offset_min` already guards for their absence/emptiness (verified by reading
-   `pages/geo_explorer.py`'s `_render_us_choropleth` — checks `"state" not in music_df.columns` —
-   and `_build_city_stats`, which only requires `city, lat, lng, artist, track, date_text`).
-   `lat`/`lng` (the actual map-plotting requirement) are always present and accurate, since the DB
-   schema stores them faithfully for every source.
+**Design decisions**:
 
-2. **`apply_swarm_offsets` is *not* superseded by the ASOF join.** Read
-   `LocalizerBroker.get_merged_frame()`'s implementation in full: its `pd.merge_asof(...,
-   direction="backward")` only carries `lat/lng/place_name/place_type` onto the nearest prior
-   place row — it does not touch timezone offsets, does not apply the assumptions file's
-   holidays/trips/residency/default-location fallback, and produces no `tz_offset_min` column.
-   **Resolution**: the wiring must *not* call `get_merged_frame()` for the final `_raw_df`. It
-   must fetch raw events and raw places separately (new `LocalizerBroker.get_events_frame()` /
-   `get_places_frame()` methods, Subtask 1), adapt them into the legacy `lastfm_df`/`swarm_df`
-   shapes (Subtask 2), and then call the existing, already-tested `apply_swarm_offsets(events_df,
-   places_df, assumptions)` exactly as `DataBroker.get_merged_frame()` already does — reusing
-   proven logic instead of re-deriving it.
+- **Widget choice — `st.selectbox`, not `st.radio`.** `tests/test_geo_explorer.py` has several
+  tests with exact-length `mock_radio.side_effect` lists (e.g. `test_table_view_dispatches` expects
+  exactly two `st.radio` calls: "By Artist"/"By City" then "Sort by"). An unconditional third radio
+  call would exhaust those lists and break passing tests. A selectbox mirrors the existing "Artist"
+  selectbox pattern and, gated behind `has_swarm`, never executes in any currently-passing test —
+  every existing test in `test_geo_explorer.py` passes `swarm_df: None`.
+- **Label wording is a judgment call, resolved as**: `"All"`, `"Swarm"`, `"Google Timeline"` — a
+  `SOURCE_LABELS` dict in `core/source_filter.py` maps known `source_id` values to these labels,
+  falling back to `source_id.replace("_", " ").title()` for any future/unknown source so the
+  filter never crashes on new plugins.
+- **Legacy-path parity is in scope.** Both `load_swarm_data()` and `load_google_timeline()` are
+  called as two separate steps in `_load_data_with_progress()` immediately before the existing
+  `pd.concat()` — tagging `source_id` there is a small, additive change requiring no modification
+  to `analysis_utils.py` itself (both loader functions stay untouched and reusable elsewhere).
+- **`apply_swarm_offsets()` is unaffected.** Read in full (`analysis_utils.py` lines 538+): it only
+  reads `swarm_df["timestamp"/"offset"/"city"/"state"/"country"/"lat"/"lng"]` via positional
+  `.values` indexing — it never iterates over "all columns," so adding `source_id` to the frame it
+  receives is safe and was verified by reading the function, not assumed.
+- **Filter placement**: the filter must apply to `swarm_df` before any consumption — map plotting,
+  groupby aggregation, and the shareable HTML export alike — so all downstream views/exports agree
+  on what's currently selected. In both pages, the filter is applied once, immediately after
+  reading `swarm_df` from session state (mirroring how `geo_explorer.py` already filters `music_df`
+  once, right after its own popover, before view dispatch).
 
-3. **Legacy plugin config coexistence.** `_make_broker()`'s existing docstring intent — "opt-in
-   when the DuckDB store exists, else fall back to legacy per-session file config, unchanged" — is
-   preserved as-is and made the actual live switch. When `~/.localizer/store.duckdb` exists,
-   `render_sidebar()` uses the broker path exclusively for that session (the legacy
-   `file_path`/`swarm_dir`/`timeline_path` REGISTRY config becomes inert for data loading, though
-   the Data Sources page's plugin config UI itself is untouched — configuring/fetching still writes
-   to the DuckDB store via `localizer fetch`, so there is no competing write path). When the store
-   does not exist, behavior is byte-for-byte unchanged from today. Rationale: this matches the
-   pre-existing, already-tested `_make_broker()` contract exactly, requires no new user-facing
-   toggle, and avoids the correctness risk of two data sources disagreeing silently.
+**Explicit out-of-scope pages (documented so they aren't re-litigated later)**: `pages/data_sources.py`
+(the config/loader page — not a display consumer), `pages/overview.py`, `pages/life_in_chapters.py`,
+`pages/listening_lifestyle.py`, and `pages/insights.py` all read `swarm_df`, but only for derived
+analytics (residency inference, venue-pattern scoring, chapter maps, transit-day computation,
+AI-generated narrative text) rather than the direct map/breakdown display this task targets. The
+task's own framing ("at minimum" Geo Explorer and Check-in Insights) permits but does not require
+expanding scope to these; keeping the diff focused on the two named pages avoids scope creep. A
+reasonable follow-up would extend the same `core/source_filter.py` helper to these pages later.
 
-4. **`swarm_df` consumers.** `pages/places.py::render_checkin_insights()` and
-   `pages/geo_explorer.py`'s map views read `st.session_state["swarm_df"]` directly and use only
-   `lat`, `lng`, `city`, `country` (both guard for `country`'s absence). `LocalizerBroker` gets a
-   new `get_places_frame()` method (all sources, unfiltered — mirrors the internal
-   `store.query_places()` call already made inside `get_merged_frame()`) and Subtask 2's
-   `places_to_swarm_frame()` adapter produces a frame with the *exact* column set
-   `load_swarm_data()`'s empty-frame declares (`timestamp, offset, city, state, country, venue,
-   venue_category, lat, lng, event_category, shout`) so no consumer, present or future, sees a
-   narrower shape than it does today.
+**Files never touched by this plan**: `analysis_utils.py` (both `load_swarm_data()` and the
+localizer-side `load_google_timeline()` parser stay byte-for-byte unchanged — tagging happens at
+the call site in `sidebar.py`, not inside the loaders), `core/broker.py` (its `get_places_frame()`
+already returns `source_id` — confirmed by reading Subtask 1 of the prior `handoff.md`, now
+`Plan Status: COMPLETE`), `record_flythrough.py`.
 
-5. **Caching.** The existing cache (`get_cache_key`/`get_cached_data`/`save_to_cache`) keys on
-   file **mtimes** of the Last.fm CSV / Swarm dir / assumptions file / Timeline path — none of
-   which exist in broker mode, and a stale key would silently show data from before the last
-   `localizer sync`, which is exactly the correctness risk flagged for this decision.
-   **Resolution**: do not reuse the file-hash cache for the broker path at all. Instead, reuse the
-   *existing* `_current_config`/`_loaded_config` reload-detection mechanism already in
-   `render_sidebar()` (it already skips reloading when `_loaded_config == current_config`) with a
-   broker-mode identity tuple of `(store_path, store_mtime, assumptions_path)`. Since `localizer
-   sync` / `localizer fetch` write to the DuckDB file, its mtime changes on every sync, so this
-   tuple naturally invalidates the in-session cache exactly when the underlying data changes — no
-   new caching layer, no staleness window, reusing a mechanism already proven correct for the
-   legacy path.
+**Architecture context**: no prior `/feature-dev` or `/plan-feature` run occurred for this task. The
+user supplied a fully diagnosed problem statement and asked for investigation-driven planning. All
+findings above were verified by reading `core/localizer_frames.py`, `components/sidebar.py`,
+`analysis_utils.py` (`load_swarm_data`, `apply_swarm_offsets`), `pages/geo_explorer.py`,
+`pages/places.py`, `visualize.py`, and the existing test files (`tests/test_localizer_frames.py`,
+`tests/test_sidebar.py`, `tests/test_geo_explorer.py`) in full — not inferred from names alone.
 
-**Explicit out-of-scope limitation (documented, not fixed here)**: the "Cinematic Fly-through"
-recording feature in `pages/places.py` / `pages/geo_explorer.py` shells out to
-`record_flythrough.py <csv_path> --swarm_dir ... --assumptions ...`, reading `csv_path` from
-`st.session_state["_loaded_config"][0]`. In broker mode there is no CSV file to pass.
-`_current_config`/`_loaded_config` keeps its existing 4-tuple shape in broker mode with index 0
-(`file_path`) set to `""`, so index-based reads in `places.py`/`geo_explorer.py` keep working
-without a `KeyError`/`IndexError`; the flythrough subprocess will simply fail to record (the
-existing `rec_status.update(label="Recording failed...", state="error")` error path already
-handles this gracefully — verified by reading that code — so the app does not crash). Making
-`record_flythrough.py` itself DuckDB-aware is out of scope for this plan, since the user's ask is
-specifically about the map/geo *display* path. Subtask 4's manual verification step confirms this
-degrades gracefully rather than crashing.
+Plan Review: APPROVED — Four-part fix to preserve `source_id` through both the broker and legacy
+data pipelines and expose a shared, pure source filter in Geo Explorer and Check-in Insights,
+implemented via 5 falsifiable, dependency-ordered, file-disjoint subtasks (2 independent
+pipeline-tagging subtasks, a shared pure helper, and two consuming-page wiring subtasks that both
+depend on the helper).
 
-**Files never touched by this plan** (confirmed via investigation, listed so later agents don't
-re-litigate): `core/analysis_loader.py` (unrelated CSV/plugin bridge), `pages/data_sources.py`
-(legacy plugin config UI — remains visually present; whether to add "using DuckDB store" messaging
-there is a reasonable follow-up but is feature creep beyond this task's ask), and
-`record_flythrough.py` (see limitation above).
+Re-review after revision: Subtask 4's Description, AC #1, and AC #5 were rewritten by the planner to
+fix the two defects flagged in the prior review round, and both fixes were verified directly against
+`pages/geo_explorer.py` rather than trusting the planner's self-report:
+- AC #1 now correctly attributes the check-in groupby variable named `ci` to `_render_2d_map` (lines
+  562-576, confirmed by reading the file) and `checkin_geo` to the separate `_render_3d_globe`
+  function (lines 275-284, confirmed). The "By City" mode only relabels `city` → `"Check-ins"`
+  (line 573) without changing which rows are included, matching AC #1's claim that filtering is
+  identical across "By Artist"/"By City" modes.
+- AC #5 was rewritten from the factually-wrong claim about a swarm-driven "By City" breakdown table
+  into a regression guard: `_build_city_stats()`/`_render_city_breakdown()`/`_render_atlas_city_detail()`
+  (lines 793-1037) must remain untouched and `music_df`-only. Verified by grepping every `swarm_df`
+  reference in the file (lines 262, 280, 517, 563, 1063-1227) — none fall inside that line range —
+  and by reading `_build_city_stats(df)`'s docstring/signature directly, which requires
+  `city`/`country`/`lat`/`lng`/`artist`/`track` (scrobble-only fields absent from `swarm_df`).
+- The filter-placement description (apply `filter_by_source()` right after `music_df`'s existing
+  date/artist filtering, lines 1191-1199, before the Share button section at line 1201) and the
+  `has_swarm`-gating pattern (mirroring the existing `has_music`-gated Artist selectbox, lines
+  1106-1128) were both confirmed against the live code.
 
-**Architecture context**: no prior `/feature-dev` or `/plan-feature` run occurred for this task;
-the user supplied a fully diagnosed root cause and asked for investigation-driven planning. The
-five design decisions above were made during this planning pass by reading the actual
-implementations of `core/broker.py`, `analysis_utils.py`, `packages/localizer/src/localizer/store/db.py`,
-and all three localizer plugin loaders (`lastfm`, `swarm`, `google_timeline`) in full — not by
-inference from names alone.
-
-Plan Review: APPROVED — all five design decisions verified line-for-line against core/broker.py, analysis_utils.py, packages/localizer/src/localizer/store/schema.py, db.py, components/sidebar.py, and pages/geo_explorer.py/places.py (column shapes, ASOF-join scope, places-table schema, _make_broker's zero production callers, state/column guards, load_swarm_data's empty-frame columns, and the flythrough error path all match the plan's claims exactly); the 4-subtask DAG is acyclic with current:1 a valid topological order, Files-to-Touch and Test-Files are fully disjoint across subtasks, and every subtask has ≥5 falsifiable, value-level acceptance criteria plus concrete Test Guidance covering edge cases.
+Nothing else regressed: DAG edges (4→3, 5→3) remain acyclic and `current: 1,2,3,4,5` is still a
+valid topological order; all 5 subtasks still carry ≥2 falsifiable ACs and Test Guidance; file and
+test-file disjointness across the batch is unchanged (`core/localizer_frames.py`+
+`tests/test_localizer_frames.py`, `components/sidebar.py`+`tests/test_sidebar.py`,
+`core/source_filter.py`+`tests/test_source_filter.py`, `pages/geo_explorer.py`+
+`tests/test_geo_explorer.py`, `pages/places.py`+`tests/test_places.py` all touch disjoint files).
+Subtasks 1, 2, 3, and 5 were untouched by this revision and remain accurate per the prior review
+round. The out-of-scope rationale (excluding overview.py, life_in_chapters.py,
+listening_lifestyle.py, insights.py, data_sources.py) still holds. Plan is ready to proceed.
 
 ## Current Subtask
-current: 4
+current: 3
 
 ---
 
 ## Subtasks
 
-### Subtask 1 — Add raw frame accessors to `LocalizerBroker`
+### Subtask 1 — Preserve `source_id` through the broker column-shape adapter
 
 **Status**: APPROVED
 
-**PR Group**: localizer-broker-frame-adapters
+**PR Group**: preserve-source-id
 
 **Depends On**: none
 
 **Description**:
-Add two new public methods to `core/broker.py::LocalizerBroker`: `get_events_frame() ->
-pd.DataFrame` and `get_places_frame() -> pd.DataFrame`, each returning **all** rows (unfiltered by
-`source_id`) from the events/places tables respectively — i.e. exactly what
-`get_merged_frame()` already fetches internally via `store.query_events()` /
-`store.query_places()` before joining them. These are the raw inputs Subtask 3 needs to run
-`apply_swarm_offsets()` instead of relying on the ASOF join (see Task Overview design decision 2).
-Follow the exact resource-management pattern already used by every other method in this class:
-open the store via `self._open_store()` inside a `with` block, catch `Exception` narrowly around
-the query, and return an empty `pd.DataFrame()` on any failure — never leave a connection open on
-an error path.
+Modify `core/localizer_frames.py::places_to_swarm_frame()` so `source_id` survives the adapter
+from the broker's generic places schema into the legacy `swarm_df` shape, instead of being dropped.
+Add `source_id` to the `SWARM_COLUMNS` module-level constant (at the end, mirroring
+`LASTFM_COLUMNS`'s existing `source_id`-last convention) and pass it through unchanged in the
+non-empty path. Update the function's docstring, which currently states `source_id` is dropped, to
+reflect the new behavior. The existing test suite (`tests/test_localizer_frames.py`) has assertions
+that explicitly check `source_id` is **absent** — these must be inverted to check it is present and
+correct, not merely relaxed, since a silently-wrong inversion would reintroduce exactly the "silent
+breakage" risk this module's own docstring warns about.
 
 **Acceptance Criteria**:
-- [ ] `LocalizerBroker(store_path=...).get_events_frame()` on a store seeded with N event rows
-  (any source) returns a DataFrame with exactly N rows and columns `timestamp, label, sublabel,
-  category, source_id`.
-- [ ] `LocalizerBroker(store_path=...).get_places_frame()` on a store seeded with M place rows
-  (mixed sources, e.g. `swarm` and `google_timeline`) returns a DataFrame with exactly M rows and
-  columns `timestamp, lat, lng, place_name, place_type, source_id` — i.e. it is **not**
-  filtered to a single `source_id` the way `get_frame(plugin_id)` is.
-- [ ] Both methods return an empty `pd.DataFrame()` (not `None`, not a raised exception) on a
-  fresh/empty store.
-- [ ] After calling either method, a second process/connection can immediately reopen the same
-  DuckDB file (mirrors the existing `test_localizer_broker_closes_connection_after_get_frame`
-  pattern) — no lingering file lock.
-- [ ] `DataBroker` and all pre-existing `LocalizerBroker` methods are untouched — this subtask is
-  purely additive.
+- [ ] `places_to_swarm_frame()` on a 3-row input with mixed `source_id` values (`"swarm"`,
+  `"google_timeline"`, `"swarm"`) produces an output where each row's `source_id` matches its input
+  row's `source_id` **after** the timestamp-based sort reorders rows (i.e. verified row-for-row
+  post-sort, not just "the values exist somewhere").
+- [ ] `list(places_to_swarm_frame(df).columns) == SWARM_COLUMNS` where `SWARM_COLUMNS` now ends
+  with `"source_id"` — both for a non-empty and an empty input.
+- [ ] `place_name` and `place_type` remain absent from the output (unchanged from today) — only
+  `source_id`'s drop behavior changes, nothing else.
+- [ ] `events_to_lastfm_frame()` is untouched and its existing tests pass with zero modification
+  (it already preserves `source_id`; this subtask must not touch it).
+- [ ] `core/localizer_frames.py` still contains no `streamlit`, `duckdb`, or `localizer.store.db`
+  substrings (the existing `test_localizer_frames_module_has_no_forbidden_imports` source-inspection
+  test must keep passing unmodified).
 
 **Files to Touch**:
-- `core/broker.py` (edit: add `get_events_frame()`, `get_places_frame()` to `LocalizerBroker`)
-- `tests/test_localizer_broker.py` (extended — new tests only)
+- `core/localizer_frames.py` (edit: add `"source_id"` to `SWARM_COLUMNS`; stop excluding it in
+  `places_to_swarm_frame()`'s result construction; update docstring)
+- `tests/test_localizer_frames.py` (edit: update the module-level `SWARM_COLUMNS` test fixture list
+  to include `"source_id"`; invert `test_places_to_swarm_frame_renames_and_fills_defaults`'s
+  `assert "source_id" not in result.columns` into a row-level correctness assertion; update
+  `test_places_to_swarm_frame_empty_input_exact_columns`'s expected column list; update
+  `test_places_to_swarm_frame_sorted_ascending_by_timestamp`'s and `..._single_row`'s assertions to
+  also check `source_id` survives the sort correctly)
 
 **Test Guidance**:
-- **Resource cleanup (required — this subtask touches DuckDB connection acquisition):** add a
-  test mirroring the existing `test_localizer_broker_closes_connection_after_get_merged_frame` /
-  `..._after_get_frame` pair for both new methods — after calling `get_events_frame()` /
-  `get_places_frame()`, open a second `LocalizerStore` on the same `tmp_path` file and confirm it
-  does not raise/hang. This is Windows-critical (an unclosed DuckDB handle blocks `tmp_path`
-  teardown) and this repo already has the pattern to copy.
-- Also verify cleanup happens even when the query raises: monkeypatch `store.query_events` (or
-  `query_places`) to raise inside the `with` block and confirm the method still returns an empty
-  DataFrame (per the existing `except Exception: return pd.DataFrame()` pattern) rather than
-  propagating, and that the store's context manager still exits (connection released) — do not
-  rely on the happy path alone.
-- Seed places from two different `source_id`s (`swarm` and `google_timeline`) in one test and
-  assert `get_places_frame()` returns rows from both — this is the behavior that distinguishes it
-  from `get_frame(plugin_id)`, which filters to one source.
-- Reuse the `_seed_events`/`_seed_places` helpers already defined at the top of
-  `tests/test_localizer_broker.py` rather than duplicating fixture-building code.
+- This is the riskiest subtask in the plan (per the module's own docstring: "a wrong column rename
+  or a silently-swapped assignment would not raise any exception anywhere downstream"). Assert on
+  actual `source_id` values at specific row indices after sorting, not on set membership alone.
+- Cover: 3-row mixed-source input (existing `_places_fixture_out_of_order()` fixture already has
+  mixed `source_id` values — reuse it rather than building a new fixture), single-row input,
+  empty input (exact column list, in order, including `source_id` at the end), and a fixture where
+  every row shares the same `source_id` (proving the passthrough doesn't accidentally collapse or
+  dedupe by source).
+- Explicitly re-assert that `place_name`/`place_type` are still dropped — this subtask changes only
+  `source_id`'s fate, and a test should catch a coder accidentally also passing through `place_name`.
+- Do not weaken the existing forbidden-imports source-inspection test; it must keep passing as-is.
 
 **Test Files**:
-- `tests/test_localizer_broker.py` (extended, 9 new tests, RED-confirmed with
-  `AttributeError: 'LocalizerBroker' object has no attribute 'get_events_frame'`, 20 pre-existing
-  tests unaffected): `test_get_events_frame_returns_all_rows_with_expected_columns`,
-  `test_get_places_frame_returns_all_rows_with_expected_columns`,
-  `test_get_events_frame_empty_store_returns_empty_dataframe`,
-  `test_get_places_frame_empty_store_returns_empty_dataframe`,
-  `test_get_places_frame_unfiltered_across_multiple_source_ids`,
-  `test_get_events_frame_closes_connection_after_call`,
-  `test_get_places_frame_closes_connection_after_call`,
-  `test_get_events_frame_returns_empty_and_releases_connection_on_query_exception`,
-  `test_get_places_frame_returns_empty_and_releases_connection_on_query_exception`.
-- Tester's notes for the coder: mirror `get_frame()`'s exact shape (lines 220-238 of
-  `core/broker.py`) — `try: with self._open_store() as store: df = store.query_events(...);
-  return df` / `except Exception: return pd.DataFrame()` (keep the `# noqa: BLE001` comment for
-  ruff consistency). Do not touch `_available_types`/`_refresh_available_types()` bookkeeping —
-  the new methods are pure query passthroughs, unlike `get_merged_frame()`/`load()`.
+`tests/test_localizer_frames.py` — RED-confirmed (`python -m pytest tests/test_localizer_frames.py -v`: 5 failed / 8 passed; failures are `KeyError: 'source_id'`/column-set mismatches, the correct pre-implementation failure mode).
+- `test_places_to_swarm_frame_renames_and_fills_defaults` (inverted from "absent" to row-level post-sort correctness)
+- `test_places_to_swarm_frame_sorted_ascending_by_timestamp` (added source_id-survives-sort assertions)
+- `test_places_to_swarm_frame_single_row` (added source_id assertion)
+- `test_places_to_swarm_frame_empty_input_exact_columns` (exercises updated `SWARM_COLUMNS` fixture)
+- `test_places_to_swarm_frame_same_source_id_not_collapsed` (new — proves passthrough doesn't dedupe by source)
+
+**Revision (NEEDS_REVISION cycle, owner finding on AC #2)**: tightened
+`test_places_to_swarm_frame_renames_and_fills_defaults` (line 178) from
+`assert set(result.columns) == set(SWARM_COLUMNS)` to
+`assert list(result.columns) == SWARM_COLUMNS`, matching the exact-order check
+AC #2 requires for the non-empty-input path (the empty-input counterpart,
+`test_places_to_swarm_frame_empty_input_exact_columns`, already asserted exact
+order and was untouched). No implementation edit was made — the owner's finding
+noted the current implementation's unconditional `result[SWARM_COLUMNS]`
+re-index already satisfies exact order; this was a test-strength gap only.
+Confirmed the tightened assertion passes against the current (unchanged)
+implementation: `python -m pytest tests/test_localizer_frames.py -v --no-cov`
+— 13 passed, 0 failed (including
+`test_places_to_swarm_frame_renames_and_fills_defaults` individually, 1 passed).
 
 **Implementation Notes**:
-Added `get_events_frame()` and `get_places_frame()` to `LocalizerBroker` in `core/broker.py`,
-directly after the existing `get_frames()` method. Both mirror `get_frame()`'s exact
-try/with/except shape: open the store via `self._open_store()`, call `store.query_events()` /
-`store.query_places()` with no `source_id` filter (returning all rows across every source), and
-`except Exception: return pd.DataFrame()` with the `# noqa: BLE001` comment for ruff consistency.
-Neither method touches `_available_types`/`_refresh_available_types()` — purely additive query
-passthroughs, no side effects, no changes to `DataBroker` or any pre-existing method.
+Added `"source_id"` as the last entry in the module-level `SWARM_COLUMNS` constant and
+added `"source_id": places_df["source_id"]` as the last key in the dict passed to
+`pd.DataFrame(...)` inside `places_to_swarm_frame()`, so it passes through unchanged
+(no rename, no default-fill) exactly like the pre-existing `lat`/`lng` passthrough
+columns. Updated the function's docstring to state `source_id` is preserved instead of
+dropped, and to list it as the final column in the returned shape. `place_name` and
+`place_type` remain dropped — only `source_id`'s fate changed, matching AC #3.
 
-Verification:
-- `pytest tests/test_localizer_broker.py -v --no-cov` — 29 passed (20 pre-existing + 9 new), 0
-  failed.
-- `ruff check core/broker.py tests/test_localizer_broker.py` — all checks passed.
-- `ruff format --check core/broker.py tests/test_localizer_broker.py` — both files already
-  formatted.
-- `mypy` (unscoped) — Success: no issues found in 14 source files.
-- `pytest tests/ --no-cov -q` (full suite, regression check) — 846 passed, 4 failed, 1 collection
-  error. All four failures are in `tests/test_sidebar.py::TestBrokerModeWiring` (Subtask 3, still
-  RED — no broker branch exists yet in `components/sidebar.py`); the collection error is
-  `tests/test_localizer_frames.py` failing to import `core.localizer_frames` (Subtask 2, still
-  RED — module not yet created). Both are pre-existing, expected RED states for not-yet-implemented
-  subtasks, not regressions introduced by this change. No other test in the suite was affected.
+The test file (`tests/test_localizer_frames.py`) was already written by the tester
+agent in the RED phase with `SWARM_COLUMNS` (test-local copy) ending in `"source_id"`
+and with inverted/augmented assertions checking `source_id` presence and row-for-row
+correctness post-sort; no test-file edits were needed or made in this GREEN phase.
+
+Ran `python -m pytest tests/test_localizer_frames.py -v`: 13 passed, 0 failed.
+Ran `ruff check core/localizer_frames.py`: no issues found.
+Ran `ruff format --check core/localizer_frames.py`: already formatted, no changes needed.
+
+No deviations from the plan; no files touched beyond `core/localizer_frames.py` (the
+`Files to Touch` list's test-file edits were already done by the tester, so only the
+source file required a coder edit).
+
+**Post-revision confirmation (second GREEN pass)**: Re-verified the owner's NEEDS_REVISION
+finding. The tester already tightened
+`test_places_to_swarm_frame_renames_and_fills_defaults` (line 178,
+`tests/test_localizer_frames.py`) from `assert set(result.columns) ==
+set(SWARM_COLUMNS)` to `assert list(result.columns) == SWARM_COLUMNS`, closing the
+exact-order gap the owner flagged for the non-empty-input path. Confirmed via
+`Grep` that line 178 (and the empty-input counterpart at line 286) both now use
+the exact-list-order assertion. Ran `python -m pytest tests/test_localizer_frames.py
+-v --no-cov`: 13 passed, 0 failed, exit code 0 — the tightened assertion passes
+against the current, unmodified `core/localizer_frames.py` implementation (its
+unconditional `result[SWARM_COLUMNS]` re-index at the end of
+`places_to_swarm_frame()` already enforces column order deterministically). No
+implementation change was required or made in this pass; only the test file was
+touched, and it was touched by the tester agent, not this coder pass. Ran
+`python -m ruff check core/localizer_frames.py tests/test_localizer_frames.py` —
+all checks passed. Ran `python -m ruff format --check core/localizer_frames.py
+tests/test_localizer_frames.py` — 2 files already formatted, no new lint/format
+violations introduced.
 
 **Review Notes**:
-Code Review: APPROVED — checks clean. `get_events_frame()`/`get_places_frame()` (core/broker.py
-lines 248-276) mirror `get_frame()`'s exact try/with(`self._open_store()`)/except Exception (with
-`# noqa: BLE001`)/return `pd.DataFrame()` pattern; neither is filtered by `source_id`; neither
-touches `_available_types`/`_refresh_available_types()`. Scoped tests: `pytest
-tests/test_localizer_broker.py -v --no-cov` — 29 passed, 0 failed. `ruff check core/broker.py
-tests/test_localizer_broker.py` — all checks passed. `ruff format --check .` — only
-`tests/test_localizer_frames.py` (Subtask 2, out of scope) needs reformatting; Subtask 1's files
-are clean. `mypy` (unscoped) — Success, no issues in 14 source files. Full suite `pytest tests/
---no-cov -q` — 846 passed, 4 failed (all `tests/test_sidebar.py::TestBrokerModeWiring`, Subtask 3,
-still RED by design) plus 1 collection error (`tests/test_localizer_frames.py`, Subtask 2, still
-RED by design) — no other regressions. No dead code, secrets, or N+1 patterns found in the diff.
+Code Review: APPROVED — checks clean
 
-Owner Review: APPROVED — independently re-read core/broker.py's `get_events_frame()`/
-`get_places_frame()` (lines 248-276) and confirmed the diff against `main` is a clean, purely
-additive 30-line insertion (git diff main -- core/broker.py: "1 file changed, 30 insertions(+)")
-touching nothing else — `DataBroker` and every pre-existing `LocalizerBroker` method untouched.
-Both methods are minimal passthroughs mirroring `get_frame()`'s exact
-try/with(`self._open_store()`)/except Exception(`# noqa: BLE001`)/return `pd.DataFrame()` shape;
-neither filters by `source_id` (satisfies the criterion distinguishing them from `get_frame()`);
-the exception path is caught outside the `with` block so the context manager's `__exit__` (and
-thus connection release) runs before the `except` clause returns the empty frame on both the
-happy and failure paths. Independently re-ran: `pytest tests/test_localizer_broker.py -v --no-cov`
-— 29 passed, 0 failed; `mypy` (unscoped) — Success, no issues in 14 source files; `ruff check .` —
-2 errors, both in `tests/test_localizer_frames.py` (Subtask 2, out of scope), zero in Subtask 1's
-files (confirmed separately: `ruff check core/broker.py tests/test_localizer_broker.py` — all
-checks passed); `ruff format --check .` — only `tests/test_localizer_frames.py` needs
-reformatting, as expected. Verified all 5 acceptance criteria against the 9 new tests
-(row-count + column-shape, empty-store, multi-source-id unfiltered query, connection-release on
-both happy and exception paths) — every Test Guidance item has a corresponding test, using the
-existing `_seed_events`/`_seed_places` helpers as instructed. No naming, simplicity, or best-practice
-issues found.
+Automated checks (all run scoped to `tests/test_localizer_frames.py`, the current
+subtask's only Test Files entry; no other subtask is yet GREEN/APPROVED):
+- `python -m ruff check core/localizer_frames.py tests/test_localizer_frames.py` — All checks passed!
+- `python -m ruff format --check core/localizer_frames.py tests/test_localizer_frames.py` — 2 files already formatted
+- `python -m mypy core/localizer_frames.py` — no issues found (this file is in `[tool.mypy] files`)
+- `python -m pytest tests/test_localizer_frames.py -v` — 13 passed, 0 failed
+
+Diff review (`git diff HEAD -- core/localizer_frames.py`, +9/-5, only touches
+`SWARM_COLUMNS`, the docstring, and the one new dict key): matches the plan exactly —
+`"source_id"` appended to `SWARM_COLUMNS`, `"source_id": places_df["source_id"]` added
+as the final key in the `pd.DataFrame(...)` construction (straight passthrough, no
+rename/default-fill, consistent with the existing `lat`/`lng` passthrough style), and
+the docstring updated to describe preservation instead of dropping. No dead code, no
+commented-out blocks, no secrets/tokens, no N+1 or hot-path synchronous-call concerns
+(pure in-memory DataFrame construction). `events_to_lastfm_frame()` is untouched, and
+`place_name`/`place_type` remain excluded from the result dict — matching AC #3 and
+AC #4.
+
+All 5 Acceptance Criteria verified:
+- AC #1 (row-for-row post-sort `source_id` correctness) — covered by
+  `test_places_to_swarm_frame_renames_and_fills_defaults` and
+  `test_places_to_swarm_frame_sorted_ascending_by_timestamp`, both passing.
+- AC #2 (`list(...columns) == SWARM_COLUMNS`, source_id last, non-empty + empty) — the
+  empty-input case is checked with an exact `list(...)` equality
+  (`test_places_to_swarm_frame_empty_input_exact_columns`); the non-empty case
+  (`test_places_to_swarm_frame_renames_and_fills_defaults`) only asserts `set(...) ==
+  set(SWARM_COLUMNS)`, not list order. This is a minor test-coverage gap against the AC's
+  literal wording, but not a functional defect: the implementation's final line always
+  does `result[SWARM_COLUMNS]` bracket-indexing, which deterministically enforces column
+  order on every call regardless of input, so the order guarantee holds even though no
+  non-empty test asserts it directly. Not blocking — noting for the owner's awareness.
+- AC #3 (`place_name`/`place_type` still absent) — explicit assertions present and passing.
+- AC #4 (`events_to_lastfm_frame` untouched) — confirmed via `git diff` (zero lines
+  changed in that function) and its 5 existing tests passing unmodified.
+- AC #5 (forbidden-imports source-inspection test) — `test_localizer_frames_module_has_no_forbidden_imports`
+  passing.
+
+No issues found that require reversal to RED.
+
+Owner Review: NEEDS_REVISION — implementation is correct and the code-mode review above
+stands; this is a test-coverage-only gap the code reviewer flagged but left as
+non-blocking. On independent review I'm sending it back because it's a real (if narrow)
+hole, not merely cosmetic:
+
+- **Finding**: `test_places_to_swarm_frame_renames_and_fills_defaults`
+  (`tests/test_localizer_frames.py` line 178) asserts
+  `set(result.columns) == set(SWARM_COLUMNS)`, which does not verify AC #2's literal
+  requirement — `list(places_to_swarm_frame(df).columns) == SWARM_COLUMNS` — for the
+  **non-empty**-input path. `test_places_to_swarm_frame_empty_input_exact_columns`
+  already does the exact-list check, but only for the empty-input branch
+  (`pd.DataFrame(columns=SWARM_COLUMNS)`, a structurally separate code path from the
+  non-empty branch's dict-construction-then-`[SWARM_COLUMNS]`-reindex). A future edit to
+  the non-empty branch that reorders the dict literal and drops the trailing
+  `[SWARM_COLUMNS]` re-index would silently break column order with zero test failure —
+  exactly the "silent breakage" risk class this subtask's own docstring and Test
+  Guidance call out ("assert ... not on set membership alone").
+- **What correct looks like**: change line 178 to
+  `assert list(result.columns) == SWARM_COLUMNS` (or add it alongside the existing set
+  check) in `test_places_to_swarm_frame_renames_and_fills_defaults`. This is a test-only
+  change — no implementation edit is required, since `core/localizer_frames.py` already
+  satisfies it via the unconditional `[SWARM_COLUMNS]` re-index at the end of
+  `places_to_swarm_frame()`.
+- Everything else in this subtask (row-for-row `source_id` correctness post-sort,
+  `place_name`/`place_type` still absent, `events_to_lastfm_frame` untouched, forbidden-imports
+  test intact, ruff/format/pytest all clean) is verified and does not need to change.
+
+Code Review: APPROVED (re-review) — Verified directly against the file on disk, not just
+the notes above: `tests/test_localizer_frames.py` line 178 now reads
+`assert list(result.columns) == SWARM_COLUMNS`, exactly closing the exact-order gap
+raised in the finding above. No implementation edit was made or needed — the
+unconditional `result[...][SWARM_COLUMNS]` re-index at the end of
+`places_to_swarm_frame()` (`core/localizer_frames.py` line 96) already guarantees exact
+column order on every call. Re-ran the scoped suite directly:
+`python -m pytest tests/test_localizer_frames.py -v --no-cov` — 13 passed, 0 failed.
+`python -m ruff check core/localizer_frames.py tests/test_localizer_frames.py` — all
+checks passed. `python -m ruff format --check ...` — 2 files already formatted.
+`python -m mypy core/localizer_frames.py` — no issues found. Confirmed all Test Guidance
+items are present: mixed-source 3-row fixture, single-row, empty-input exact columns,
+`test_places_to_swarm_frame_same_source_id_not_collapsed` (line 309, proves passthrough
+doesn't dedupe by source), and `test_localizer_frames_module_has_no_forbidden_imports`
+(line 324) all present and passing. All 5 Acceptance Criteria are satisfied with no
+remaining gaps. Approved — advancing to Subtask 2.
 
 ---
 
-### Subtask 2 — Column-shape adapters: broker schema → legacy `lastfm_df`/`swarm_df` shapes
+### Subtask 2 — Preserve `source_id` through the legacy flat-file pipeline
 
 **Status**: APPROVED
 
-**PR Group**: localizer-broker-frame-adapters
+**PR Group**: preserve-source-id
 
 **Depends On**: none
 
 **Description**:
-Create `core/localizer_frames.py` with two pure, Streamlit-free functions:
-
-- `events_to_lastfm_frame(events_df: pd.DataFrame) -> pd.DataFrame` — renames
-  `label→artist`, `sublabel→track`, `category→album`; adds a `date_text` column via
-  `pd.to_datetime(events_df["timestamp"], unit="s")` (naive datetime64, matching
-  `load_listening_data()`'s output — confirmed via `tests/test_analysis_utils.py`, which builds
-  `date_text` fixtures as naive `pd.to_datetime(["2021-01-01 10:00", ...])` with no `utc=True`);
-  keeps `timestamp` and `source_id`. Empty input returns an empty frame with columns
-  `timestamp, date_text, artist, track, album, source_id`.
-- `places_to_swarm_frame(places_df: pd.DataFrame) -> pd.DataFrame` — renames `place_name→city`
-  (also copied into a separate `venue` column — see Task Overview decision 1 for why `place_name`
-  stands in for both), `place_type→venue_category`; adds `state=""`, `country=""`, `offset=0`,
-  `event_category=""`, `shout=""` (the DuckDB places schema does not carry these — see Task
-  Overview decision 1); keeps `timestamp`, `lat`, `lng`. Sorts by `timestamp` ascending (required
-  by `apply_swarm_offsets`'s `np.searchsorted` binary search over `swarm_df["timestamp"]`, and
-  matches `load_swarm_data()`'s and `_load_data_with_progress()`'s existing sort convention).
-  Empty input returns an empty frame with **exactly** the same column list `load_swarm_data()`
-  declares on its empty-input path: `timestamp, offset, city, state, country, venue,
-  venue_category, lat, lng, event_category, shout`.
-
-This module has no dependency on `LocalizerBroker`, DuckDB, or Streamlit — it is pure
-DataFrame-in/DataFrame-out logic, independently testable with hand-built fixtures.
+Modify `components/sidebar.py::_load_data_with_progress()` so the legacy (non-broker) loading path
+also tags each row with its origin. Immediately after `load_swarm_data(swarm_dir)` returns a
+non-empty frame, assign `swarm_df["source_id"] = "swarm"`. Immediately after
+`load_google_timeline(timeline_path)` returns a non-empty frame, assign
+`timeline_df["source_id"] = "google_timeline"`, before the existing `pd.concat()` call. Do not
+modify `analysis_utils.py`'s `load_swarm_data()` or the localizer-side `load_google_timeline()`
+parser — both stay exactly as they are; tagging happens only at this call site. When neither
+source is configured, `swarm_df` remains the existing empty `pd.DataFrame()` with no `source_id`
+column at all — this is an acceptable, already-handled edge case that Subtask 3's filter helper
+must tolerate gracefully (not this subtask's concern to guard against).
 
 **Acceptance Criteria**:
-- [ ] `events_to_lastfm_frame()` on a 3-row events DataFrame produces exactly the renamed
-  columns with values matching the input row-for-row (e.g. `label="Radiohead"` →
-  `artist="Radiohead"` at the same row index) — not just "columns exist," but value-level
-  correctness.
-- [ ] `events_to_lastfm_frame()`'s `date_text` column has dtype `datetime64[ns]` (no timezone)
-  and, for a known unix timestamp, produces the exact same wall-clock value
-  `load_listening_data()` would produce for an equivalent CSV row (cross-checked against a
-  `pd.to_datetime(..., unit="s")` reference value in the test, not against `load_listening_data`
-  itself, since there is no CSV involved).
-- [ ] `places_to_swarm_frame()` on a 3-row places DataFrame produces `city` and `venue` both
-  equal to the input's `place_name`, `venue_category` equal to `place_type`, `state == ""`,
-  `country == ""`, `offset == 0`, `lat`/`lng` preserved exactly (no float precision loss).
-- [ ] `places_to_swarm_frame()`'s output is sorted ascending by `timestamp` even when the input is
-  out of order.
-- [ ] Both functions return an empty DataFrame with the exact column list specified above (not a
-  subset, not extra columns) when given an empty input DataFrame — this is directly consumed by
-  `apply_swarm_offsets`, which branches on `swarm_df.empty`, so an empty-but-wrong-shaped frame
-  would silently degrade rather than error.
-- [ ] Neither function imports `streamlit`, `duckdb`, or `localizer.store.db` — grep-checkable,
-  proving this module stays a pure adapter layer independent of the broker's I/O.
+- [ ] With both `swarm_dir` and `timeline_path` configured, the resulting `swarm_df` in
+  `st.session_state["swarm_df"]` has every Swarm-derived row's `source_id == "swarm"` and every
+  Timeline-derived row's `source_id == "google_timeline"`, verified by cross-referencing specific
+  `timestamp` values from each mocked loader's fixture (not just checking two distinct values
+  exist).
+- [ ] With only `swarm_dir` configured (no `timeline_path`), every resulting row has
+  `source_id == "swarm"`.
+- [ ] The existing `TestLoadDataCombination` tests (`test_timeline_rows_appended_to_swarm`,
+  `test_combined_frame_sorted_by_timestamp`, `test_no_timeline_leaves_swarm_only`) continue to pass
+  with their row-count and sort-order assertions unchanged — only augmented with `source_id`
+  assertions, not altered in their existing checks.
+- [ ] `load_swarm_data` and `load_google_timeline` are called with the exact same arguments as
+  today (no signature change) — confirmed by the existing mocks (`patch.object(sidebar,
+  "load_swarm_data", ...)`) requiring zero changes to their call sites' argument lists.
 
 **Files to Touch**:
-- `core/localizer_frames.py` (new)
-- `tests/test_localizer_frames.py` (new)
+- `components/sidebar.py` (edit: `_load_data_with_progress()` — tag `source_id` on `swarm_df` and
+  `timeline_df` before the concat; update module docstring's "Broker mode"/session-state contract
+  section if it references `swarm_df`'s column shape)
+- `tests/test_sidebar.py` (edit: extend `TestLoadDataCombination` with `source_id` assertions on
+  the existing fixtures; add a case for swarm-only, keeping all existing assertions intact)
 
 **Test Guidance**:
-- This is **the riskiest subtask in the plan** — a wrong column rename or a silently-swapped
-  `city`/`venue` assignment would not raise any exception anywhere downstream; pages would just
-  render an empty or mislabeled map, exactly the kind of silent breakage the user flagged as the
-  top risk. Write tests that assert on actual values at specific row indices, not just
-  `set(df.columns) == expected`.
-- Test both functions with realistic multi-row fixtures built by hand (do not go through
-  `LocalizerBroker`/DuckDB here — that coupling belongs to Subtask 3's integration test).
-- Cover: empty-input column-shape-preservation (both functions), single-row, multi-row with mixed
-  `source_id` values (function must not care about `source_id` beyond passing it through), a place
-  row with `place_name=""` (empty string, not missing) to confirm no accidental `NaN`/`None`
-  substitution occurs where an empty string is the correct passthrough value, and non-monotonic
-  input timestamps for the sort-order assertion.
-- Verify float precision: use lat/lng values with several decimal places (e.g. `51.50735`) and
-  assert exact equality after the round-trip, not `pytest.approx` — renaming columns must not
-  coerce dtypes.
+- Reuse the existing `self.swarm_df` / `self.timeline_df` fixtures in `TestLoadDataCombination`'s
+  `setUp()` — do not rebuild new fixtures; add `source_id` assertions on top of the existing
+  row-count/sort-order checks so the diff stays minimal and provably non-regressive.
+- Cover: both sources present (mixed `source_id` values, verified per-row against known timestamps
+  from each fixture), swarm-only (`timeline_path=""`, all rows `"swarm"`), and — as a documented
+  edge case, not a new requirement — confirm that when neither source is configured the empty
+  `pd.DataFrame()` path (already covered by other existing tests in this file) is untouched by this
+  change.
+- This is a plain column-tagging change with no branching complexity; a single focused test class
+  extension is sufficient — no need for exhaustive combinatorial cases beyond what's listed above.
 
 **Test Files**:
-- `tests/test_localizer_frames.py` (new, 12 tests, RED-confirmed with
-  `ModuleNotFoundError: No module named 'core.localizer_frames'`):
-  `test_events_to_lastfm_frame_renames_columns_with_row_level_values`,
-  `test_events_to_lastfm_frame_preserves_timestamp_and_mixed_source_id`,
-  `test_events_to_lastfm_frame_date_text_dtype_and_value`, `test_events_to_lastfm_frame_single_row`,
-  `test_events_to_lastfm_frame_empty_input_exact_columns`,
-  `test_places_to_swarm_frame_renames_and_fills_defaults`,
-  `test_places_to_swarm_frame_sorted_ascending_by_timestamp`,
-  `test_places_to_swarm_frame_empty_place_name_not_coerced_to_nan`,
-  `test_places_to_swarm_frame_preserves_lat_lng_exact_precision`,
-  `test_places_to_swarm_frame_single_row`, `test_places_to_swarm_frame_empty_input_exact_columns`,
-  `test_localizer_frames_module_has_no_forbidden_imports` (source-inspection test reading the
-  module's text directly, so it stays meaningful post-implementation too). Also hard-asserts
-  `source_id`/`place_name`/`place_type` do NOT leak into `places_to_swarm_frame`'s output, since
-  the legacy `swarm_df` shape has no `source_id` column.
-- Tester's notes: `load_swarm_data()`'s empty-input column list (`timestamp, offset, city, state,
-  country, venue, venue_category, lat, lng, event_category, shout`) matches the plan 1:1 — mirror
-  it literally. `load_listening_data()` is NOT a usable model for `events_to_lastfm_frame`'s
-  empty-frame shape (it returns `None` on missing file, and its columns are raw-CSV-shaped, never
-  `label/sublabel/category`-renamed) — build the empty-frame column list directly from this
-  subtask's Acceptance Criteria text instead. `core/` is a plain package with `__init__.py`, so
-  `from core.localizer_frames import ...` is the correct import path.
+`tests/test_sidebar.py` — RED-confirmed (`pytest tests/test_sidebar.py -v`: 2 failed / 7 passed; failures are `AssertionError: 'source_id' not found in Index(...)`, the correct pre-implementation failure mode; all 7 pre-existing tests pass unmodified).
+- `TestLoadDataCombination::test_source_id_tagged_per_row_when_both_sources_present` (cross-references known timestamps against `source_id`)
+- `TestLoadDataCombination::test_source_id_all_swarm_when_only_swarm_dir_configured` (swarm-only case)
+- AC #4 (loader call-argument stability) intentionally has no dedicated test — it's vacuously true pre-implementation since tagging doesn't touch call sites; verify by inspection at review time.
 
 **Implementation Notes**:
-Created `core/localizer_frames.py` with two pure, Streamlit/DuckDB-free functions:
+In `components/sidebar.py::_load_data_with_progress()`, tagged `swarm_df["source_id"]
+= "swarm"` immediately after `load_swarm_data(swarm_dir)` returns (guarded by the
+existing `if not swarm_df.empty:` check, added inline), and tagged
+`timeline_df["source_id"] = "google_timeline"` immediately after
+`load_google_timeline(timeline_path)` returns non-empty, before the existing
+`pd.concat()` call. Neither `load_swarm_data` nor `load_google_timeline` call sites'
+arguments changed — tagging is a pure post-return DataFrame column assignment, so
+`analysis_utils.py` was not touched at all, matching the plan.
 
-- `events_to_lastfm_frame(events_df)`: empty input returns
-  `pd.DataFrame(columns=LASTFM_COLUMNS)` where `LASTFM_COLUMNS = ["timestamp",
-  "date_text", "artist", "track", "album", "source_id"]`. Non-empty path renames
-  `label→artist`, `sublabel→track`, `category→album` via `.rename()`, adds `date_text
-  = pd.to_datetime(events_df["timestamp"], unit="s")` (naive datetime64[ns]), then
-  reindexes to the exact `LASTFM_COLUMNS` order.
-- `places_to_swarm_frame(places_df)`: empty input returns
-  `pd.DataFrame(columns=SWARM_COLUMNS)` matching `analysis_utils.py::load_swarm_data()`'s
-  literal empty-frame column list (confirmed by reading lines 142-160 of that file).
-  Non-empty path builds a fresh `pd.DataFrame` with `city` and `venue` both copied from
-  `place_name` (not derived from each other, so an empty-string `place_name` survives as
-  `""` in both, never coerced to `NaN`), `venue_category` from `place_type`, `state`/
-  `country`/`event_category`/`shout` hardcoded to `""`, `offset` hardcoded to `0`,
-  `lat`/`lng` passed through unchanged (no dtype coercion), then sorts ascending by
-  `timestamp` and resets the index before reindexing to `SWARM_COLUMNS`. `source_id`,
-  `place_name`, `place_type` are never included in the output frame.
-- One deviation caught by the source-inspection test
-  (`test_localizer_frames_module_has_no_forbidden_imports`): my first draft's module
-  docstring mentioned "localizer.store.db" in prose, which the test's substring grep
-  correctly flagged since it checks raw file text, not imports. Reworded the docstring
-  to describe the same thing without using that literal string.
+Also added one clarifying sentence to the module docstring's session-state contract
+(`swarm_df` entry) noting each row now carries a `source_id` of `"swarm"` or
+`"google_timeline"`, since the docstring previously didn't describe the column shape
+at all — a minor addition beyond the letter of "Files to Touch" but within its
+explicit allowance to "update module docstring's ... session-state contract section
+if it references swarm_df's column shape."
 
-No deviations from Files to Touch; no files added beyond the plan.
+The two new tests in `tests/test_sidebar.py`
+(`test_source_id_tagged_per_row_when_both_sources_present` and
+`test_source_id_all_swarm_when_only_swarm_dir_configured`) were already written by
+the tester agent in the RED phase; no test-file edits were made in this GREEN pass.
 
-Verification:
-- `pytest tests/test_localizer_frames.py -v --no-cov` — 12 passed, 0 failed (all
-  acceptance criteria covered: row-level rename correctness, timestamp/source_id
-  passthrough with mixed source_id, date_text dtype+value, single-row, empty-input
-  exact column shape for both functions, sort-order correctness, empty-string
-  place_name not coerced to NaN, exact float precision on lat/lng, and the
-  forbidden-imports source-inspection check).
-- `ruff check core/localizer_frames.py` — all checks passed.
-- `ruff format core/localizer_frames.py` then `ruff format --check core/localizer_frames.py`
-  — reformatted once (line-length wrap on the `.rename()` call), then clean. Did not
-  touch `tests/test_localizer_frames.py` (pre-existing unused `pytest` import flagged by
-  `ruff check .` at repo root belongs to the tester's file, out of scope for this
-  subtask's Files to Touch).
-- `mypy` (unscoped) — Success: no issues found in 15 source files.
-- `pytest tests/ -v --no-cov -q` (full suite) — 858 passed, 4 failed. All 4 failures are
-  in `tests/test_sidebar.py::TestBrokerModeWiring` (Subtask 3, still RED by design — no
-  broker branch exists yet in `components/sidebar.py`). The prior collection error for
-  `tests/test_localizer_frames.py` is now gone since the module exists. No other
-  regressions; 858 = 846 pre-existing passed + 12 new Subtask 2 tests.
+When neither source is configured, `swarm_df` stays the pre-existing empty
+`pd.DataFrame()` with no `source_id` column — untouched by this change, as specified
+(Subtask 3's filter helper is responsible for tolerating that case).
+
+Ran `python -m pytest tests/test_sidebar.py -v --no-cov`: 9 passed, 0 failed (7
+pre-existing + 2 new). Ran the scoped set including Subtask 1's GREEN/APPROVED tests:
+`python -m pytest tests/test_sidebar.py tests/test_localizer_frames.py -v --no-cov`:
+22 passed, 0 failed.
+Ran `python -m ruff check components/sidebar.py tests/test_sidebar.py`: all checks
+passed. Ran `python -m ruff format --check components/sidebar.py tests/test_sidebar.py`:
+2 files already formatted, no changes needed. Ran `python -m mypy components/sidebar.py`:
+no issues found.
+
+No deviations from the plan; no files touched beyond `components/sidebar.py` (test-file
+edits were already made by the tester in the RED phase).
 
 **Review Notes**:
-Code Review: NEEDS_REVISION — independently verified all four value-level correctness items
-(rename correctness, date_text naive-datetime64 derivation and empty-column shape, city/venue
-both copied from place_name with state/country/offset/lat/lng/sort correctness cross-checked
-byte-for-byte against `analysis_utils.py::load_swarm_data()`'s literal empty-column list at
-lines 146-160, and a case-sensitive re-grep confirming no literal `streamlit`/`duckdb`/
-`localizer.store.db` substrings anywhere in `core/localizer_frames.py` — the docstring's
-capitalized "Streamlit-" / "DuckDB-free" prose does not collide with the test's lowercase-only
-check, so that part is fine). No correctness bugs found in `core/localizer_frames.py` itself.
-However, the unscoped mandatory gate fails on this subtask's own Files-to-Touch:
-- `ruff check .` → 1 error: `F401 'pytest' imported but unused` in
-  `tests/test_localizer_frames.py:20` (the import is never referenced anywhere in the file —
-  confirmed via grep for `pytest\.` with zero hits).
-- `ruff format --check .` → `tests/test_localizer_frames.py` would be reformatted (1 of 131
-  files).
-Both are in a file explicitly listed under this subtask's own "Files to Touch". CLAUDE.md
-Section 7 requires `ruff check .`/`ruff format --check .` to exit 0 with "no exceptions" before
-any commit/push; the Implementation Notes' rationale ("tester's file, out of scope") does not
-override that mandate since the file is part of this subtask's deliverable set. Fix: remove the
-unused `import pytest` line (or replace with a `# noqa: F401` only if there's a real reason to
-keep it — there isn't one visible here) and run `ruff format .`. Scoped tests
-(`pytest tests/test_localizer_frames.py -v --no-cov`, 12 passed), `mypy` (unscoped, success on 15
-files), and the full suite (`pytest tests/ --no-cov -q`, 858 passed / 4 failed, all 4 the expected
-Subtask 3 `TestBrokerModeWiring` RED tests, no other regressions) all otherwise pass cleanly.
-Status flipped back to RED for this one mechanical lint fix; no changes needed to
-`core/localizer_frames.py` itself.
+Code Review: APPROVED — checks clean
 
-**Lint-fix follow-up (coder)**: Removed the unused `import pytest` line from
-`tests/test_localizer_frames.py` (no `pytest.` usages existed anywhere in the file) and ran
-`ruff format .`, which reformatted that same file (line-length rewrap of the empty-input
-column-list literal). No changes made to `core/localizer_frames.py`. Re-verified the full gate:
-`ruff check .` — no issues found; `ruff format --check .` — 131 files already formatted; `mypy`
-(unscoped) — no issues found; `pytest tests/test_localizer_frames.py -v --no-cov` — 12 passed, 0
-failed; full suite `pytest --no-cov -q` — 858 passed, 4 failed (all four are the expected
-pre-existing `tests/test_sidebar.py::TestBrokerModeWiring` RED tests for not-yet-implemented
-Subtask 3, no other regressions). Status flipped back to GREEN.
+Automated checks (scoped to the current subtask's Test Files entry
+(`tests/test_sidebar.py`) plus Subtask 1's GREEN/APPROVED `tests/test_localizer_frames.py`;
+no other subtask is yet GREEN/APPROVED):
+- `python -m ruff check components/sidebar.py tests/test_sidebar.py` — All checks passed!
+- `python -m ruff format --check components/sidebar.py tests/test_sidebar.py` — 2 files already formatted
+- `python -m mypy components/sidebar.py` — no issues found
+- `python -m pytest tests/test_sidebar.py tests/test_localizer_frames.py -v --no-cov` — 22 passed, 0 failed
 
-Code Review: APPROVED — re-ran the full unscoped gate from a clean venv activation: `ruff check .`
-— no issues found; `ruff format --check .` — 131 files already formatted; `mypy` (unscoped) — no
-issues found; `pytest tests/test_localizer_frames.py -v --no-cov` — 12 passed, 0 failed; full suite
-`pytest --no-cov -q` — 858 passed, 4 failed, all four in `tests/test_sidebar.py::
-TestBrokerModeWiring` (Subtask 3, still RED by design — no broker branch exists yet in
-`components/sidebar.py`), no other regressions and no collection errors. Independently re-read
-`core/localizer_frames.py` and `tests/test_localizer_frames.py` in full: `events_to_lastfm_frame`
-correctly renames `label→artist`/`sublabel→track`/`category→album`, derives `date_text` via
-`pd.to_datetime(events_df["timestamp"], unit="s")` (naive, no `utc=True`), and returns exactly
-`LASTFM_COLUMNS` (`timestamp, date_text, artist, track, album, source_id`) including on the
-empty-input path. `places_to_swarm_frame` copies `place_name` into both `city` and `venue`
-independently (not derived from each other, so an empty-string `place_name` survives as `""` in
-both rather than being coerced to `NaN`), renames `place_type→venue_category`, hardcodes
-`state`/`country`/`event_category`/`shout` to `""` and `offset` to `0`, preserves `lat`/`lng`
-verbatim (no dtype coercion), sorts ascending by `timestamp`, and drops `source_id`/`place_name`/
-`place_type` from the output — matching `SWARM_COLUMNS` exactly, which I cross-checked byte-for-
-byte and in the same order against `analysis_utils.py::load_swarm_data()`'s literal empty-frame
-column list (lines 146-160: `timestamp, offset, city, state, country, venue, venue_category, lat,
-lng, event_category, shout`). Grepped the module source directly for `streamlit`, `duckdb`, and
-`localizer.store.db` — zero hits; the module is a pure DataFrame-in/DataFrame-out adapter with no
-I/O coupling, as required. The lint-fix follow-up only touched `tests/test_localizer_frames.py`
-(removed unused `import pytest`, reformatted); `core/localizer_frames.py` itself is unchanged from
-the version already verified correct in the prior review round. No remaining issues found.
+Diff review (`git diff -- components/sidebar.py`, +6/-1; `git diff -- tests/test_sidebar.py`,
++33/-0): matches the plan exactly. `components/sidebar.py`'s only functional change is two
+guarded assignments — `swarm_df["source_id"] = "swarm"` right after `load_swarm_data()`
+returns non-empty, and `timeline_df["source_id"] = "google_timeline"` right after
+`load_google_timeline()` returns non-empty, before the existing `pd.concat()` — plus a
+docstring sentence describing the new `source_id` column in the session-state contract.
+`tests/test_sidebar.py`'s diff is purely additive (two new test methods appended to
+`TestLoadDataCombination`); the three pre-existing tests
+(`test_timeline_rows_appended_to_swarm`, `test_combined_frame_sorted_by_timestamp`,
+`test_no_timeline_leaves_swarm_only`) are byte-for-byte unchanged and still pass. No dead
+code, no commented-out blocks, no secrets/tokens, no N+1 or hot-path synchronous-call
+concerns (pure in-memory pandas column assignment). Confirmed `analysis_utils.py` has zero
+diff (`git diff --stat -- analysis_utils.py` empty) — `load_swarm_data()` and
+`load_google_timeline()` were not touched, matching the subtask's explicit constraint.
 
-Owner Review: APPROVED — independently re-read `core/localizer_frames.py` and
-`tests/test_localizer_frames.py` in full against Subtask 2's Description/Acceptance Criteria in
-this handoff. Confirmed: (1) value-level correctness — `events_to_lastfm_frame` renames
-`label/sublabel/category` to `artist/track/album` with row-for-row values verified, derives
-`date_text` via naive `pd.to_datetime(timestamp, unit="s")` matching `test_analysis_utils.py`'s
-naive-datetime fixture convention; `places_to_swarm_frame` copies `place_name` independently into
-both `city` and `venue` (confirmed an empty-string `place_name` survives as `""` in both, not
-coerced to `NaN`), renames `place_type→venue_category`, hardcodes `state/country/event_category/
-shout` to `""` and `offset` to `0`, preserves `lat`/`lng` with exact float precision, and sorts
-ascending by `timestamp`. (2) Simplicity — two flat functions plus two module-level column-order
-constants (`LASTFM_COLUMNS`/`SWARM_COLUMNS`); no classes, no premature abstraction, no dead code;
-docstrings are Google-style and explain purpose/params/returns rather than narrating "what" the
-code does line-by-line, matching CLAUDE.md's documentation convention. (3) Architectural
-constraint — grepped `core/localizer_frames.py` directly for `streamlit`, `duckdb`, and
-`localizer.store.db`: zero hits; the module imports only `pandas` and `__future__.annotations`,
-confirming it stays the pure, I/O-free adapter layer this subtask (flagged as the plan's riskiest)
-requires for independent testability. (4) Independently re-ran `pytest
-tests/test_localizer_frames.py -v --no-cov` — 12 passed, 0 failed — and `ruff check
-core/localizer_frames.py tests/test_localizer_frames.py` — no issues found. No naming,
-simplicity, correctness, or best-practice issues found beyond what the reviewer already caught and
-the coder already fixed (the unused-import lint issue). Approved; advancing `current` to 3.
+All 4 Acceptance Criteria verified:
+- AC #1 (mixed-source row-for-row tagging, cross-referenced by timestamp) — covered by
+  `test_source_id_tagged_per_row_when_both_sources_present`, passing.
+- AC #2 (swarm-only → all rows `"swarm"`) — covered by
+  `test_source_id_all_swarm_when_only_swarm_dir_configured`, passing.
+- AC #3 (existing `TestLoadDataCombination` tests unchanged and passing) — confirmed via
+  diff (only additions) and the pytest run above.
+- AC #4 (loader call-argument stability) — confirmed by inspection: `load_swarm_data(swarm_dir)`
+  and `load_google_timeline(timeline_path)` call sites are unmodified; tagging happens only via
+  a post-return attribute assignment on the returned DataFrame.
+
+No issues found that require reversal to RED.
+
+Owner Review: APPROVED — Independently verified, not just re-reading the code-review notes:
+- Re-read `components/sidebar.py` lines 230-289 in full. Traced both branches: swarm-only
+  (`timeline_path` falsy short-circuits the second `if`, so only the guarded
+  `swarm_df["source_id"] = "swarm"` assignment runs) and both-configured (swarm tagged first,
+  then `timeline_df["source_id"] = "google_timeline"` immediately before the existing
+  `pd.concat()`/re-sort). Both traces match AC #1 and AC #2 exactly, including the
+  `if not swarm_df.empty` / `if not timeline_df.empty` guards that keep the untouched
+  "neither configured" empty-`pd.DataFrame()` path (no `source_id` column at all) exactly as
+  it was before this diff — that path is out of scope per the subtask's own description and
+  Subtask 3 is responsible for tolerating it.
+- Re-ran the scoped set independently rather than trusting the coder/reviewer's prior output:
+  `python -m pytest tests/test_sidebar.py tests/test_localizer_frames.py -v --no-cov` → 22
+  passed, 0 failed. `python -m ruff check components/sidebar.py tests/test_sidebar.py` → all
+  checks passed. `python -m ruff format --check components/sidebar.py tests/test_sidebar.py` →
+  2 files already formatted. `python -m mypy components/sidebar.py` → no issues found.
+- Diff is minimal (+6/-1 in `components/sidebar.py`, purely additive +33/-0 in
+  `tests/test_sidebar.py`) and `analysis_utils.py` has zero diff, confirmed via
+  `git diff HEAD -- components/sidebar.py tests/test_sidebar.py`. No dead code, no
+  over-abstraction — two guarded one-line column assignments, exactly what the plan called for.
+  Mutating the DataFrame returned by `load_swarm_data()`/`load_google_timeline()` in place is
+  safe here: both loaders build a fresh `pd.DataFrame` from a Python list on every call
+  (confirmed by reading `analysis_utils.py::load_swarm_data`), so there is no shared/cached
+  frame elsewhere that this mutation could corrupt.
+- All 4 Acceptance Criteria verified directly (not merely by re-reading the code reviewer's
+  claims): AC #1 (`test_source_id_tagged_per_row_when_both_sources_present` cross-references
+  the exact fixture timestamps 100/300 → "swarm", 200/400 → "google_timeline"), AC #2
+  (`test_source_id_all_swarm_when_only_swarm_dir_configured`), AC #3 (the three pre-existing
+  `TestLoadDataCombination` tests are byte-for-byte unchanged in the diff and still pass), AC #4
+  (loader call sites `load_swarm_data(swarm_dir)` / `load_google_timeline(timeline_path)`
+  unmodified — tagging is a post-return attribute assignment only).
+- One non-blocking observation for the record: the Test Guidance's claim that the
+  "neither source configured" empty-`pd.DataFrame()`-with-no-`source_id` case is "already
+  covered by other existing tests in this file" is not literally accurate — grepping this file
+  shows exactly one call site to `_load_data_with_progress()` (inside `_run()`), and it always
+  passes a truthy `swarm_dir` with `os.path.exists` mocked `True`, so that exact branch
+  combination is never exercised end-to-end here. This is not a functional gap, though: the
+  `else: swarm_df = pd.DataFrame()` branch is completely untouched by this diff (confirmed via
+  the diff above — no lines changed in that branch), so there is no new regression risk, and a
+  test asserting today's unchanged behavior would pass vacuously either way. Not blocking.
+
+Both subtasks in PR Group `preserve-source-id` (Subtask 1 and Subtask 2) are now `APPROVED`.
+Proceeding per AGENTS.md "After each subtask is APPROVED" §4 (full PR-group close).
 
 ---
 
-### Subtask 3 — Wire the broker + adapters into `components/sidebar.py`
+### Subtask 3 — Shared pure source-filter helper (`core/source_filter.py`)
 
-**Status**: APPROVED
+**Status**: RED
 
-**PR Group**: wire-localizer-broker-into-app
+**PR Group**: geo-source-filter-ui
 
-**Depends On**: 1, 2
+**Depends On**: none
 
 **Description**:
-Restructure `render_sidebar()` / `_load_data_with_progress()` so that when
-`LocalizerStore.default_path().exists()` is true (the same check `_make_broker()` already makes),
-the entire data-loading path branches to a new broker-backed loader instead of the legacy
-CSV-gated path — fixing the actual reported bug. Concretely:
+Create `core/source_filter.py` with three small, pure, Streamlit-free functions used by both
+consuming pages (Subtasks 4 and 5) so the source→label mapping and filtering logic exists in
+exactly one place:
 
-1. Add a private helper, e.g. `_broker_store_identity() -> tuple[str, float, str] | None`, that
-   returns `(str(store_path), store_path.stat().st_mtime, assumptions_path)` when the store
-   exists, else `None`. This becomes the broker-mode `current_config` value (see Task Overview
-   decision 5) — reusing the *existing* `_current_config`/`_loaded_config` skip-reload mechanism
-   in `render_sidebar()` rather than adding a second one.
-2. When in broker mode: instantiate `LocalizerBroker()` (default store path), call
-   `get_events_frame()` / `get_places_frame()`, adapt them via
-   `events_to_lastfm_frame()` / `places_to_swarm_frame()` (Subtask 2), then call the existing
-   `apply_swarm_offsets(events_frame, places_frame, assumptions)` — do **not** call
-   `get_merged_frame()` (see Task Overview decision 2). Do not call `get_cache_key` /
-   `get_cached_data` / `save_to_cache` in this branch at all (see Task Overview decision 5); set
-   `st.session_state["_cache_status"]` to a new literal, e.g. `"n/a"`, so the Data Sources page's
-   existing cache-status display does not misreport a legacy cache hit/miss that never happened.
-   Store the adapted places frame into `st.session_state["swarm_df"]` and the
-   `apply_swarm_offsets` result into `st.session_state["_raw_df"]`, exactly like the legacy path
-   does today.
-3. Keep `st.session_state["_current_config"]` as a **4-tuple** in both modes so
-   index-based readers elsewhere (`pages/places.py`, `pages/geo_explorer.py`'s flythrough code,
-   which read `loaded_config[0]`/`[1]`/`[2]`) never hit an `IndexError`. In broker mode, use
-   `("", "", assumptions_path, "")` for `_current_config`/`_loaded_config`'s *displayed* tuple
-   while the *reload-detection* comparison uses the richer `_broker_store_identity()` value
-   stored under a separate session-state key (e.g. `_loaded_store_identity`) — do not conflate the
-   two, since `_current_config`'s shape is a public-ish contract read by other modules.
-4. When the store does not exist, fall through to exactly today's legacy behavior — no change to
-   that code path's logic, only its position (now inside an `else` branch).
+- `source_label(source_id: str) -> str` — returns `SOURCE_LABELS.get(source_id,
+  source_id.replace("_", " ").title())` where `SOURCE_LABELS = {"swarm": "Swarm",
+  "google_timeline": "Google Timeline"}`. Unknown/future `source_id` values get a humanized
+  fallback label rather than crashing or being hidden.
+- `get_source_options(swarm_df: pd.DataFrame | None) -> list[str]` — returns `["All"]` when
+  `swarm_df` is `None`, empty, or lacks a `source_id` column; otherwise returns `["All"]` followed
+  by the sorted, de-duplicated human labels of every distinct `source_id` present.
+- `filter_by_source(swarm_df: pd.DataFrame | None, selected_label: str) -> pd.DataFrame | None` —
+  returns `swarm_df` unchanged when it is `None`/empty, when `selected_label == "All"`, or when the
+  `source_id` column is absent (graceful passthrough, never an exception). Otherwise returns only
+  the rows whose `source_label(row.source_id) == selected_label`, with a reset index.
+
+This module has no dependency on Streamlit, DuckDB, or `LocalizerBroker` — pure DataFrame-in/
+DataFrame-out logic, independently testable with hand-built fixtures, mirroring
+`core/localizer_frames.py`'s existing convention.
 
 **Acceptance Criteria**:
-- [ ] With a `tmp_path`-scoped DuckDB store seeded with `lastfm` events and `google_timeline`
-  places (mocking `LocalizerStore.default_path()` to point at it, following
-  `tests/test_cutover.py`'s `_FakePath` pattern), calling `render_sidebar()` populates
-  `st.session_state["df"]` with non-empty `lat`/`lng` values sourced from the seeded
-  `google_timeline` rows, and `st.session_state["swarm_df"]` with the corresponding place rows.
-- [ ] When the store does not exist, `render_sidebar()`'s behavior (including the early-return
-  when no legacy `file_path` is configured) is byte-for-byte unchanged — run the full existing
-  `tests/test_sidebar.py` suite unmodified and confirm it still passes.
-- [ ] Calling `render_sidebar()` twice in the same session with the store's mtime unchanged
-  performs the broker query/`apply_swarm_offsets` computation exactly once (reload-skip works);
-  touching the store file's mtime between calls (e.g. `os.utime`) triggers a second load — this is
-  the load-bearing proof that Task Overview decision 5's mtime-based reload-identity actually
-  prevents both staleness *and* redundant recomputation.
-- [ ] `st.session_state["_current_config"]` remains a 4-element tuple in both broker and legacy
-  modes (index-checkable), so `pages/places.py`'s `loaded_config[0]`/`[1]`/`[2]` reads never raise.
-- [ ] In broker mode, `st.session_state["_cache_status"]` is never `"hit"` or `"miss"` (those
-  literals only apply to the legacy file-hash cache) — confirms the file-hash cache path is
-  genuinely not exercised in broker mode, not just skipped-but-still-reachable.
+- [ ] `get_source_options()` on a `None` input, an empty DataFrame, and a DataFrame with no
+  `source_id` column all return exactly `["All"]`.
+- [ ] `get_source_options()` on a DataFrame with `source_id` values `["swarm", "google_timeline",
+  "swarm"]` returns exactly `["All", "Google Timeline", "Swarm"]` (alphabetically sorted labels
+  after `"All"`).
+- [ ] `filter_by_source(df, "All")` returns a frame with the same row count as the input, for both
+  a `source_id`-bearing and a `source_id`-lacking input.
+- [ ] `filter_by_source(df, "Swarm")` on a mixed-source 4-row fixture (2 swarm, 2 google_timeline)
+  returns exactly the 2 rows whose `source_id == "swarm"`, values matching the input row-for-row
+  (not just row count).
+- [ ] `filter_by_source(df, "Nonexistent Label")` (a label matching no present source) returns an
+  empty-but-correctly-shaped DataFrame (same columns, zero rows) rather than raising or returning
+  the unfiltered frame.
+- [ ] `source_label("swarm") == "Swarm"`, `source_label("google_timeline") == "Google Timeline"`,
+  and `source_label("some_future_plugin") == "Some Future Plugin"` (humanized fallback).
 
 **Files to Touch**:
-- `components/sidebar.py` (edit: branch `render_sidebar()`/`_load_data_with_progress()` on store
-  existence; add `_broker_store_identity()`; wire in `LocalizerBroker` +
-  `core.localizer_frames` adapters)
-- `tests/test_sidebar.py` (extended — new tests for the broker branch; zero edits to the existing
-  `TestLoadDataCombination` tests, which must keep proving the legacy path is untouched)
+- `core/source_filter.py` (new)
+- `tests/test_source_filter.py` (new)
 
 **Test Guidance**:
-- Follow this file's existing mocking convention exactly: `_make_st()` helper building a
-  `MagicMock()` with a real dict `session_state`, `st.columns.return_value` set to a tuple of
-  `MagicMock()`s matching however many columns the broker-mode status widget uses (re-check the
-  actual `st.columns([...])` call count/shape inside the new branch and size the mock tuple to
-  match — per this repo's documented convention of keeping `side_effect`/`return_value` column
-  counts in sync with the real call), and `patch.object(sidebar, "st", st)` plus
-  `patch.object(sidebar.os.path, "exists", ...)` as needed.
-- Mock `LocalizerStore.default_path()` via `patch("localizer.store.db.LocalizerStore.default_path",
-  ...)` returning a real `tmp_path` file (not a `MagicMock` with `.exists()` stubbed) for the
-  integration-style tests that need a real mtime to manipulate; use the lighter `_FakePath`
-  pattern from `tests/test_cutover.py` only for tests that merely need `.exists()` to return
-  True/False and don't touch mtime.
-- Test the reload-skip / reload-trigger behavior directly: seed a store, call `render_sidebar()`,
-  patch/spy on `LocalizerBroker.get_events_frame` (or the module-level adapter calls) to count
-  invocations, call `render_sidebar()` again unchanged (expect 0 additional calls), bump the
-  store file's mtime with `os.utime`, call a third time (expect 1 additional call).
-- Test the `_cache_status` acceptance criterion directly by asserting the literal value after a
-  broker-mode `render_sidebar()` call.
-- Test that when `LocalizerStore.default_path()` raises `ImportError` (localizer package not
-  installed — mirrors `_make_broker()`'s existing `try/except ImportError` guard), `render_sidebar()`
-  falls back to legacy behavior rather than crashing.
-- This subtask is the second-riskiest in the plan (most files touched, most branching): after
-  writing the broker-mode tests, re-run the *entire* `tests/test_sidebar.py` file and diff the
-  pass count against pre-change HEAD to catch any accidental regression in the legacy branch
-  introduced while restructuring the `if`/`else`.
+- Cover all three functions independently with hand-built fixtures (do not route through
+  `LocalizerBroker`, `core/localizer_frames.py`, or Streamlit — that integration belongs to
+  Subtasks 4/5).
+- Explicitly test the "graceful passthrough" edge cases required by the acceptance criteria: `None`
+  input, empty DataFrame, missing `source_id` column, and a single-distinct-value `source_id`
+  column (proving the filter is a harmless no-op rather than something that needs to be hidden by
+  the caller).
+- Test the unknown-label fallback in `source_label()` with at least two different underscore-
+  separated inputs to confirm the humanization formula generalizes (not hardcoded to one string).
+- Test that `filter_by_source()` never mutates its input DataFrame in place (assert the original
+  `df` still has all rows after calling the function) — pure functions must not have side effects
+  on caller-owned data.
 
 **Test Files**:
-- `tests/test_sidebar.py` (extended with a new `TestBrokerModeWiring` class; zero edits to the
-  existing `TestLoadDataCombination` tests). RED-confirmed, 4 tests, all failing for the correct
-  reason (no broker branch exists yet, so `render_sidebar()` always takes the legacy early-return
-  with no `file_path` configured):
-  - `test_render_sidebar_populates_df_from_seeded_broker_store` — fails: `session_state['df']` is
-    `None`, expected non-empty with seeded `"Artist0"` in `artist` column.
-  - `test_render_sidebar_populates_swarm_df_from_seeded_broker_store` — fails:
-    `session_state['swarm_df']` is `None`, expected non-empty with seeded `51.5074` in `lat`/`lng`.
-  - `test_cache_status_is_na_literal_in_broker_mode` — fails: `_cache_status` is `None`, expected
-    `"n/a"`.
-  - `test_render_sidebar_reload_skip_and_trigger_on_store_mtime` — fails:
-    `LocalizerStore.query_events` call count is 0, expected >0 (store never queried).
-  - Design choice: tests seed a *real* tmp-dir `LocalizerStore` and drive the *real*
-    `render_sidebar()` through a mocked `st` only, rather than patching not-yet-existing symbols
-    (`get_events_frame`, `events_to_lastfm_frame`, etc.) — robust to the coder's exact internal
-    call-site choices while still failing for the right reason today.
-  - Three Test Guidance items could not get standalone new tests (documented as a NOTE docstring
-    inside `TestBrokerModeWiring` in the test file): (1) "store absent → unchanged legacy
-    behavior" is already covered by the untouched `TestLoadDataCombination` tests continuing to
-    pass; (2) "`_current_config` stays a 4-tuple" is already true unconditionally today (code
-    always writes a 4-tuple), so cannot be made to fail pre-implementation — reviewer should
-    verify by inspection; (3) "`ImportError` on `LocalizerStore.default_path()` falls back to
-    legacy" has no import site inside `render_sidebar()` yet (only the currently-uncalled
-    `_make_broker()` has that guard) — recommend the reviewer add a companion test once the coder
-    adds the actual import, verifying it reuses `_make_broker()`'s existing `try/except
-    ImportError` pattern.
+`tests/test_source_filter.py` (new) — RED-confirmed (`pytest tests/test_source_filter.py`: collection error `ModuleNotFoundError: No module named 'core.source_filter'`, fails all 20 tests — correct pre-implementation state since the module doesn't exist yet).
+20 tests covering all 6 ACs plus edge cases: `test_source_label_known_swarm`, `test_source_label_known_google_timeline`, `test_source_label_unknown_humanized_fallback_first_example`, `test_source_label_unknown_humanized_fallback_second_example`, `test_get_source_options_none_input_returns_all_only`, `test_get_source_options_empty_dataframe_returns_all_only`, `test_get_source_options_missing_source_id_column_returns_all_only`, `test_get_source_options_mixed_sources_sorted_after_all`, `test_get_source_options_single_distinct_source_value`, `test_filter_by_source_none_input_returns_none`, `test_filter_by_source_empty_dataframe_returns_unchanged`, `test_filter_by_source_all_label_mixed_source_row_count_unchanged`, `test_filter_by_source_all_label_no_source_id_row_count_unchanged`, `test_filter_by_source_missing_source_id_column_is_graceful_passthrough`, `test_filter_by_source_swarm_label_returns_only_swarm_rows_row_for_row`, `test_filter_by_source_google_timeline_label_returns_only_those_rows`, `test_filter_by_source_nonexistent_label_returns_empty_but_correctly_shaped`, `test_filter_by_source_result_has_reset_index`, `test_filter_by_source_does_not_mutate_input_in_place`, `test_source_filter_module_has_no_forbidden_imports`.
 
 **Implementation Notes**:
-Implemented the design exactly as specified:
-
-- Added `_broker_store_identity(assumptions_path) -> tuple[str, float, str] | None`
-  in `components/sidebar.py`: mirrors `_make_broker()`'s `try/except ImportError`
-  guard around `from localizer.store.db import LocalizerStore`, returns
-  `(str(store_path), store_path.stat().st_mtime, assumptions_path)` when
-  `store_path.exists()`, else `None`.
-- Added `_load_data_from_broker(assumptions_path)`: instantiates `LocalizerBroker()`
-  (cached in `st.session_state["_broker_instance"]` — see deviation note below),
-  calls `get_events_frame()`/`get_places_frame()`, adapts via
-  `events_to_lastfm_frame()`/`places_to_swarm_frame()`, then calls the existing
-  `apply_swarm_offsets(lastfm_df, swarm_df, assumptions)` — never
-  `get_merged_frame()`. Does not touch `get_cache_key`/`get_cached_data`/
-  `save_to_cache` at all. Sets `st.session_state["_cache_status"] = "n/a"`.
-  Stores the adapted places frame into `swarm_df` and the offset result into
-  `_raw_df`, matching the legacy path's session-state keys.
-- Rewired `render_sidebar()`: computes `broker_identity =
-  _broker_store_identity(assumptions_path)` once per call. When not `None`
-  (broker mode), writes `_current_config = ("", "", assumptions_path, "")` (still
-  a 4-tuple), compares a separate `_loaded_store_identity` session-state key
-  against `broker_identity` to decide whether to skip the reload, and — critically
-  — re-computes and stores `_broker_store_identity(assumptions_path)` **after**
-  the load completes rather than reusing the pre-load value (see deviation note).
-  When `broker_identity` is `None`, falls through to the legacy branch, which is
-  byte-for-byte the prior code, now indented under `else`.
-- Updated the module docstring's session-state contract to document `"n/a"` for
-  `_cache_status` and the new `_loaded_store_identity` key and "Broker mode"
-  section.
-
-Two deviations from the plan's literal description, both discovered empirically
-while making the reload-skip/trigger test pass (`test_render_sidebar_reload_skip_and_trigger_on_store_mtime`):
-
-1. **DuckDB touches the file's mtime merely by opening a connection for a read
-   query** (verified empirically: opening `LocalizerStore` and calling
-   `query_events()` changes `store_path.stat().st_mtime` even with no writes).
-   This means an identity captured *before* triggering a load is stale by the
-   time the next `render_sidebar()` call re-stats the file — every call would
-   see a "changed" mtime and reload again, forever. Fix: `render_sidebar()`
-   re-computes `_broker_store_identity(assumptions_path)` a second time
-   *after* `_load_data_from_broker()` returns, and stores that post-load value
-   as `_loaded_store_identity`, not the pre-load value.
-2. **`LocalizerBroker()`'s constructor itself performs one `query_events()`/
-   `query_places()` call** (via `_refresh_available_types()`, pre-existing
-   Subtask-1-adjacent code, untouched here). Reconstructing a new
-   `LocalizerBroker()` on every reload would therefore add a second,
-   redundant `query_events()` call per reload beyond the one
-   `get_events_frame()` call the test expects (it asserts the query count
-   increases by *exactly* 1 on a genuine mtime-triggered reload). Fix: cache
-   the `LocalizerBroker` instance in `st.session_state["_broker_instance"]`
-   and reuse it across reloads within a session, only re-invoking
-   `get_events_frame()`/`get_places_frame()` on each reload rather than
-   rebuilding the broker.
-
-A third, unplanned fix was required in `tests/test_visualize.py`'s
-`TestSidebarDataLoading` class (4 tests: `test_render_sidebar_sets_df_none_when_no_file_path`,
-`test_render_sidebar_publishes_current_config`,
-`test_render_sidebar_skips_load_when_already_loaded`,
-`test_render_sidebar_loads_when_config_changed`). These pre-existing tests call
-`render_sidebar()` without mocking `LocalizerStore.default_path()` (they predate
-broker-mode wiring and only ever needed to exercise the legacy path). On this
-dev machine, `~/.localizer/store.duckdb` genuinely exists (the user's real
-3,076-row Google Timeline sync mentioned in the Task Overview), so once
-`_broker_store_identity()` became live inside `render_sidebar()`, these 4 tests
-started taking the broker branch for real and crashed on the real (unmocked)
-`streamlit.status()`/`streamlit.columns()` outside an actual Streamlit script
-run (`AttributeError: 'NoneType' object has no attribute 'update'`). This is an
-environment-dependent test-isolation gap, not a logic bug: in a clean CI
-checkout with no local store, these tests would have passed unmodified. Fixed
-by adding `patch("components.sidebar._broker_store_identity", return_value=None)`
-to each of the 4 tests' `with` blocks, forcing the legacy branch deterministically
-regardless of what real data exists on the machine running the suite — matching
-the existing `_FakePath`/`default_path`-mocking convention used elsewhere
-(`tests/test_cutover.py`, `tests/test_sidebar.py`'s new `TestBrokerModeWiring`).
-No assertions in those 4 tests were changed, only the mock setup.
-
-No changes to `core/broker.py` or `core/localizer_frames.py` (Subtasks 1/2,
-already `APPROVED`) — this subtask's diff is confined to `components/sidebar.py`
-and the one deviation fix in `tests/test_visualize.py`.
-
-Verification:
-- `pytest tests/test_sidebar.py -v --no-cov` — 7 passed, 0 failed: the 3
-  pre-existing `TestLoadDataCombination` tests (unchanged, proving the legacy
-  path is untouched) plus the 4 new `TestBrokerModeWiring` tests, all now
-  passing. No regression in the legacy-path test count (3 before, 3 after).
-- `ruff check .` — all checks passed.
-- `ruff format --check .` — 131 files already formatted.
-- `mypy` (unscoped) — Success: no issues found in 15 source files.
-- `pytest --no-cov -q` (full suite) — 862 passed, 0 failed (858 pre-existing +
-  4 flipped `TestBrokerModeWiring` tests to GREEN, matching the plan's expected
-  count exactly; no other regressions after the `test_visualize.py` mock fix).
-
-Environment note: this worktree's editable installs of `localizer` and
-`autobiographer` had drifted to point at the main repo checkout instead of this
-worktree (`pip show localizer` showed `Editable project location:
-C:\Users\johns\Code\autobiographer\packages\localizer`, missing this branch's
-`google_timeline` plugin module and causing a collection-time
-`ModuleNotFoundError`). Re-ran `pip install -e packages/localizer/ && pip
-install -e .` from this worktree's root (per CLAUDE.md's monorepo setup
-instructions) to repoint both editable installs at this worktree before any
-tests could collect.
+(filled by coder agent)
 
 **Review Notes**:
-Code Review: APPROVED — full unscoped gate re-run from a clean venv activation: `ruff check .` —
-no issues found; `ruff format --check .` — 131 files already formatted; `mypy` (unscoped) —
-Success, no issues in 15 source files; `pytest tests/test_sidebar.py -v --no-cov` — exactly 7
-passed (3 pre-existing `TestLoadDataCombination` + 4 new `TestBrokerModeWiring`), 0 failed; full
-suite `pytest --no-cov -q` — 862 passed, 0 failed, no regressions, matching the plan's expected
-count exactly.
-
-Independently read `components/sidebar.py` in full and diffed it against the pre-subtask-3 commit
-(`8e9b1b5`, the actual parent — not `main`, which includes unrelated branch history) to isolate
-this subtask's real change: `git diff 8e9b1b5 -- components/sidebar.py` is +150/-17 (the -17 is
-purely the legacy block's re-indentation under the new `else:`; `_load_data_with_progress()`'s own
-body has zero diff hunks inside it — byte-for-byte unchanged, only its position moved). Verified
-against spec:
-- `_current_config` is a 4-tuple in both modes (`("", "", assumptions_path, "")` in broker mode,
-  `(file_path, swarm_dir, assumptions_path, timeline_path)` in legacy mode). Grepped every
-  index-based reader (`pages/places.py:317-320`, `pages/geo_explorer.py:467-470`,
-  `pages/life_in_chapters.py:525-526`, `pages/listening_lifestyle.py:963-964`,
-  `pages/data_sources.py:316-317,460-462`) — all read `_loaded_config` (not `_current_config`,
-  a naming nuance in the plan's prose, not a bug), which `render_sidebar()` also sets to the same
-  4-tuple `current_config` on every successful load in both branches, so index `[0]`/`[1]`/`[2]`
-  reads never raise `IndexError`. `data_sources.py`'s deep-analysis-cache call sites additionally
-  guard with `isinstance(..., dict)` before indexing — pre-existing defensive code, unaffected.
-- Broker mode never calls `get_cache_key`/`get_cached_data`/`save_to_cache` (grepped
-  `core/broker.py` and `_load_data_from_broker()` — those three names appear only inside
-  `_load_data_with_progress()`, the legacy function) and never calls `get_merged_frame()` (uses
-  `get_events_frame()` + `get_places_frame()` + `apply_swarm_offsets()` per Task Overview decision
-  2, confirmed at lines 166-170).
-- `_cache_status` is set to exactly `"n/a"` in broker mode (line 176) and only ever `"hit"`/`"miss"`
-  inside the legacy function — confirmed by the passing
-  `test_cache_status_is_na_literal_in_broker_mode` test and by reading both code paths directly.
-- ImportError fallback: `_broker_store_identity()` wraps `from localizer.store.db import
-  LocalizerStore` in the same `try/except ImportError: pass` shape as the pre-existing
-  `_make_broker()`, returning `None` on failure, which routes `render_sidebar()` straight to the
-  `else` (legacy) branch. Confirmed by inspection this is correct. Confirmed the gap is
-  intentionally undocumented by a standalone test — `tests/test_sidebar.py`'s
-  `TestBrokerModeWiring` docstring explains why (no live import site existed pre-subtask-3 for an
-  `ImportError` to interrupt). This is a real but narrow, low-value-to-close coverage gap (the code
-  path mirrors an already-tested pattern verbatim); flagging it here rather than blocking on it.
-- Scrutinized both empirically-discovered deviations against `core/broker.py`'s actual
-  implementation (lines 153-276): `get_events_frame()`/`get_places_frame()` each open a **fresh**
-  `self._open_store()` connection and re-query on every call — caching the `LocalizerBroker`
-  instance in session state does *not* cache the event/place data itself, only the broker object's
-  `_store_path`/`_available_types` bookkeeping (set once by `_refresh_available_types()` in
-  `__init__`, unused by the sidebar wiring). So deviation 2 carries no staleness risk — every
-  reload still issues a live query against the current file state. Deviation 1 (capturing
-  `_loaded_store_identity` post-load rather than pre-load) is the *correct* fix, not a workaround: capturing pre-load would cause every subsequent call to see a perpetually "changed" mtime (since
-  opening the store for the load itself bumps mtime) and reload forever; post-load capture is the
-  only way to make the existing mtime-based skip mechanism (Task Overview decision 5, unchanged by
-  this subtask) actually stabilize. Both are reasonable, well-reasoned responses to real,
-  verified environment behavior, not masks of latent bugs.
-- Verified the `tests/test_visualize.py` patch is narrowly scoped: `git diff 8e9b1b5 --
-  tests/test_visualize.py` is exactly `+13/-0` — four additions of
-  `patch("components.sidebar._broker_store_identity", return_value=None)` inside
-  `TestSidebarDataLoading`'s four pre-existing tests, zero assertion changes, zero other edits.
-  This forces the legacy branch deterministically regardless of this dev machine's real
-  `~/.localizer/store.duckdb`, which is a legitimate environment-isolation fix, not a weakening of
-  what those tests verify.
-- Confirmed `tests/test_sidebar.py`'s `TestLoadDataCombination` class is untouched:
-  `git diff 8e9b1b5 -- tests/test_sidebar.py` is `+211/-0` (purely additive: new imports plus the
-  new `TestBrokerModeWiring` class) — no deletions, renames, or weakened assertions in the 3
-  pre-existing legacy-path tests.
-
-No correctness issues found. Design holds up under independent re-derivation of both deviations.
-Status remains GREEN; owner may advance.
-
-Owner Review: APPROVED — independently read `components/sidebar.py` in full (all 379 lines) and
-cross-checked against Subtask 3's Description/Acceptance Criteria. Confirmed: (1) the broker/legacy
-branch in `render_sidebar()` is a single clean `if broker_identity is not None: ... else: ...` with
-no logic duplicated between the two branches beyond the unavoidable "compute config tuple → store
-it → check already_loaded → load if needed" shape, which differs enough between the two paths
-(different reload-identity source, different session-state keys, different cache semantics) to
-justify not being unified into one code path — forcing a shared abstraction here would trade clarity
-for cleverness, contrary to CLAUDE.md's Core Philosophy. (2) `_current_config` is written as a
-4-tuple in both branches (`("", "", assumptions_path, "")` broker / `(file_path, swarm_dir,
-assumptions_path, timeline_path)` legacy), satisfying the index-based-reader contract. (3) Docstrings
-are Google-style, present on every new/changed function (`_broker_store_identity`,
-`_load_data_from_broker`), and the module docstring (lines 1-45) was genuinely updated with a new
-"Broker mode" section and `_loaded_store_identity` contract entry — not just left stale. Type hints
-are complete and precise (`tuple[str, float, str] | None`).
-
-One real but non-blocking observation: `_broker_store_identity()` re-implements the same
-`try: from localizer.store.db import LocalizerStore; ... except ImportError: pass` /
-`store_path.exists()` shape already present in `_make_broker()` (lines 73-95), and `_make_broker()`
-itself remains dead code in production (grepped the full repo — its only callers are
-`tests/test_cutover.py` and `tests/test_localizer_broker.py`; still zero production call sites after
-this subtask, same as before). This is ~5 lines of duplicated guard logic, not a correctness issue,
-and the plan's own Subtask 3 description explicitly directs adding a *new* helper
-(`_broker_store_identity`) rather than reusing `_make_broker()` — reasonable, since `_make_broker()`
-returns a broker instance while the wiring needs a plain identity tuple for reload-detection, a
-different return shape. Consolidating the two would be a legitimate future cleanup (e.g. extracting
-the existence-check into a shared `_store_path_if_exists()` helper) but is out of this subtask's
-scope and not worth blocking APPROVED status over — flagging for a future pass, not sending back.
-
-ImportError-fallback test-coverage gap: accepted as-is, not sent back for a test. Reasoning: (a) the
-exact same guard shape has shipped untested in `_make_broker()` since before this plan with no
-incident, so there is direct in-repo precedent for accepting inspection-level confidence on this
-narrow defensive branch; (b) the branch is three lines with no computation — `try: import X; use X
-except ImportError: pass` — where the only way to falsify it would be to monkeypatch Python's import
-machinery (e.g. `sys.modules` poisoning) for marginal assurance beyond what two independent code
-reads have already confirmed; (c) both the automated reviewer and this owner review independently
-traced the control flow by inspection and confirmed `_broker_store_identity()` returning `None` on
-`ImportError` correctly routes `render_sidebar()` to the legacy `else` branch. Net: real but narrow
-gap, consistent with existing repo precedent, not worth the disproportionate test-authoring effort
-for this pass.
-
-Verified full-suite result reported by the reviewer (862 passed, 0 failed) is consistent with the
-diff scope reviewed; per instructions, did not re-run the suite myself.
-
-Ready to precede Subtask 4: Subtask 3 is the last blocking dependency for Subtask 4 (`Depends On: 3`),
-whose tester previously HALTed specifically pending this APPROVED status. No outstanding concerns
-that would require revisiting Subtask 3 once Subtask 4's integration test and manual verification are
-underway.
-
-Subtask 3 Status: APPROVED. Advancing `current` to 4.
+(filled by owner agent)
 
 ---
 
-### Subtask 4 — End-to-end integration test and manual visual verification
+### Subtask 4 — Wire the source filter into Geo Explorer
 
-**Status**: APPROVED
+**Status**: NEW
 
-**PR Group**: wire-localizer-broker-into-app
+**PR Group**: geo-source-filter-ui
 
 **Depends On**: 3
 
 **Description**:
-Add one integration test that drives the wired path end-to-end against a **real** temporary
-DuckDB store (no mocking of `LocalizerBroker` or the adapter functions — only `streamlit` itself
-is mocked, following this repo's established Streamlit-testing convention), seeded with both
-`lastfm` events and `google_timeline` places via `LocalizerStore.upsert_events`/`upsert_places`
-(reusing the seeding helper patterns from `tests/test_localizer_broker.py`). Then perform and
-record the results of the manual visual check the user explicitly asked for: running the real
-Streamlit app against a real populated `~/.localizer/store.duckdb` (or a copy pointed at via
-`LOCALIZER_DB_PATH`) with no legacy config paths set, and confirming Google Timeline points render
-on a map page.
+Add a `st.selectbox("Source", get_source_options(swarm_df), key="geo_source_filter")` call inside
+`pages/geo_explorer.py::render_geo_explorer()`'s existing "⚡ Filter" popover (`with filt_col: with
+st.popover("⚡ Filter"):`), shown only when `has_swarm` is true (mirroring how the Artist selectbox
+is already gated on `has_music`). After the popover block — at the same point `music_df` is
+already filtered by date range and artist (immediately before the "Share button" section) — apply
+`swarm_df = filter_by_source(swarm_df, selected_source)` so every downstream consumer
+(`_render_3d_globe`, `_render_2d_map`) sees only the filtered places, exactly once, with no
+per-view-mode duplication of filtering logic. Note that the "By City" breakdown table and city
+detail card (`_build_city_stats()` / `_render_city_breakdown()` / `_render_atlas_city_detail()`,
+lines ~793-1037) operate exclusively on `music_df` (they require `artist`/`track`/`date_text`
+columns that `swarm_df` doesn't have) and are out of scope for this subtask — check-ins only ever
+appear, in every view mode including "By City", as a single "Check-ins"-labeled dot layer on the
+map itself (the `ci` groupby in `_render_2d_map`, and the equivalent `checkin_geo` groupby in
+`_render_3d_globe`). This subtask's job is to make that dot layer (in both `_render_2d_map` and
+`_render_3d_globe`) reflect the filtered `swarm_df`, not to invent a check-in breakdown table that
+doesn't exist today.
 
 **Acceptance Criteria**:
-- [ ] The integration test seeds a `tmp_path` DuckDB store with >=2 `lastfm` events and >=2
-  `google_timeline` places, points `LocalizerStore.default_path()` at it, calls
-  `render_sidebar()` through a mocked `st`, and asserts `st.session_state["df"]` contains exactly
-  the expected number of rows with non-null `lat`/`lng` and `artist`/`track` values matching the
-  seeded event data.
-- [ ] The same test asserts `st.session_state["swarm_df"]` contains the seeded place rows with
-  `city` populated from `place_name` and correct `lat`/`lng`.
-- [ ] The test also asserts `st.session_state["df"]["date_text"]` is a proper `datetime64` column
-  usable by `.dt.date` (i.e., the exact operation `render_sidebar()`'s date-filter widget performs
-  today), proving the adapter's `date_text` column is not just present but genuinely usable by
-  existing downstream code, not merely shape-compatible.
-- [ ] **Manual verification (recorded in Implementation Notes, not automatable)**: with only
-  `~/.localizer/store.duckdb` populated (the user's actual real data — 3,076 `google_timeline`
-  rows) and no legacy Last.fm/Swarm/Timeline file paths configured in the session, running
-  `streamlit run visualize.py` and opening the Geo Explorer / Places page shows Google Timeline
-  location points on the map. Record the exact page(s) checked, the view mode used (3D Globe / 2D
-  Map), and whether points appeared, in this subtask's Implementation Notes.
-- [ ] **Manual verification of the documented flythrough limitation**: in the same broker-mode
-  session, clicking "Record Flythrough" on the Places or Geo Explorer page does not crash the
-  Streamlit app (an error is shown in the recording status widget, per the existing error-handling
-  path) — confirms Task Overview's explicit out-of-scope limitation degrades gracefully rather
-  than raising an unhandled exception that takes down the page.
-- [ ] Full existing test suite (`pytest`) passes with zero regressions.
+- [ ] With `swarm_df` seeded with mixed `source_id` values and `st.selectbox` mocked to return
+  `"Swarm"`, the 2D Map view's check-in dot layer (`_render_2d_map`'s internal `ci` groupby, lines
+  ~559-576) only reflects rows whose `source_id == "swarm"` — verified via a specific lat/lng value
+  present only in the Swarm-tagged rows appearing, and one present only in Google-Timeline-tagged
+  rows being absent. This holds in both "By Artist" and "By City" breakdown modes, since the "By
+  City" mode only changes the check-in dots' displayed label (to "Check-ins"), not their filtering.
+- [ ] With the selectbox mocked to return `"All"`, behavior is unchanged from pre-filter output
+  (same row count reaching `_render_2d_map`/`_render_3d_globe` as the unfiltered `swarm_df`).
+- [ ] When `has_swarm` is `False` (i.e. `swarm_df` is `None` or empty — the state every existing
+  test in this file already uses), the new selectbox is never called — verified by asserting
+  `st.selectbox` was not invoked with a `"Source"` label argument, so `Depends On` Subtask 3's
+  helper never even runs the "All"-only path in those cases.
+- [ ] All pre-existing tests in `tests/test_geo_explorer.py` continue to pass with zero
+  modification to their assertions (only mock setups may gain a new default `st.selectbox`
+  side effect entry if required for a shared mock across labels — verify this is not needed since
+  none currently populate `swarm_df`).
+- [ ] `_build_city_stats()` / `_render_city_breakdown()` / `_render_atlas_city_detail()` remain
+  untouched by this subtask and continue to operate solely on `music_df` — no `swarm_df` argument
+  is introduced into that call path (regression guard against accidentally wiring `swarm_df` into
+  the scrobble-only breakdown table, which would require columns it doesn't have).
 
 **Files to Touch**:
-- `tests/test_sidebar_broker_integration.py` (new)
+- `pages/geo_explorer.py` (edit: `render_geo_explorer()` — add gated `st.selectbox("Source", ...)`
+  inside the filter popover; apply `filter_by_source()` to `swarm_df` before view dispatch; import
+  `get_source_options`, `filter_by_source` from `core.source_filter`)
+- `tests/test_geo_explorer.py` (edit: add a new test class exercising the filter with a seeded,
+  mixed-source `swarm_df`; zero edits to existing test classes' assertions)
 
 **Test Guidance**:
-- Do not stub `LocalizerBroker`, `core.localizer_frames`, or `LocalizerStore` in this test — the
-  whole point is proving the real pieces from Subtasks 1-3 compose correctly end-to-end. Only
-  `streamlit` (`st`) is a `MagicMock`, matching every other sidebar test in this repo.
-- Reuse `_seed_events`/`_seed_places` from `tests/test_localizer_broker.py` if importable, or
-  inline equivalent minimal seeding — do not reinvent a third seeding helper shape.
-- Assert on **values**, not just presence: e.g. assert a specific artist name from the seeded
-  event appears in `df["artist"].tolist()`, and a specific lat/lng pair from the seeded place
-  appears in `swarm_df[["lat", "lng"]]` — silent column-shape drift (Subtask 2's top risk) would
-  otherwise pass a presence-only check while showing wrong/blank data on the actual map.
-- For the manual verification steps: since this repo's CLAUDE.md documents `localizer sync` /
-  `pip install -e packages/localizer/` as prerequisites, note in Implementation Notes whether the
-  local dev environment already has `~/.localizer/store.duckdb` populated (per the task
-  description, it does — 3,076 rows) or whether a fresh sync was needed to verify.
-- After this subtask, do a final read-through of `components/sidebar.py`'s module docstring
-  (lines 1-25) — it documents the session-state contract (`_current_config`, `_loaded_config`,
-  `_raw_df`, `swarm_df`, `df`, `_cache_status`) and must be updated to describe the new
-  broker-mode branch and the `_loaded_store_identity` key, so the contract stays accurate for the
-  next person who reads it (this is documentation upkeep, not a new test, but the coder should not
-  skip it).
+- This is the second-riskiest subtask in the plan (large file, four view-dispatch branches). After
+  writing the new filter-specific tests, re-run the entire `tests/test_geo_explorer.py` file and
+  confirm the exact same pass count as before this change — this is the load-bearing regression
+  check, since none of the four existing view-dispatch tests populate `swarm_df` today and must
+  keep passing completely unmodified.
+- Build a mixed-source `swarm_df` fixture with at least one row's `lat`/`lng`/`city` unique to
+  `"swarm"` and one unique to `"google_timeline"`, so filtering-by-source assertions can check for
+  presence/absence of specific values, not just row counts.
+- Test the check-in dot layer in both `_render_2d_map` (via its `ci` groupby, lines ~559-576) and
+  `_render_3d_globe` (via its `checkin_geo` groupby, lines ~275-438) — these are the two independent
+  consumption points of the same filtered `swarm_df` and both must reflect the filter. Do **not**
+  test `_build_city_stats()`/the "By City" breakdown table against `swarm_df` — that path only ever
+  consumes `music_df` and is explicitly out of scope (see Acceptance Criterion #5's regression
+  guard); a test asserting swarm data appears there would be testing for a regression, not a
+  feature.
+- Verify the selectbox is only rendered when `has_swarm` — mock `st.selectbox` with a side-effect
+  function keyed by label (like the existing `test_us_states_view_dispatches`'s `_sel_side_effect`
+  pattern) so adding the new call doesn't silently break the Artist-selectbox's expected return
+  value in tests that do populate `swarm_df`.
+- No concurrency, network I/O, or database-write risk domains apply to this subtask (pure
+  Streamlit widget wiring over in-memory DataFrames) — standard Streamlit-mock test technique
+  already used throughout this file suffices.
 
 **Test Files**:
-`tests/test_sidebar_broker_integration.py` (new) — re-run by the tester now that Subtasks 1-3 are
-`APPROVED` (the earlier halt above no longer applies). No mocking of `LocalizerBroker`,
-`core.localizer_frames`, or `LocalizerStore` — only `streamlit` (`st`) is a `MagicMock`, matching
-`tests/test_sidebar.py`'s convention. Seeds a real `tmp_path`-scoped DuckDB store via
-`LocalizerStore.upsert_events`/`upsert_places`, reusing `_seed_events`/`_seed_places` imported
-directly from `tests/test_localizer_broker.py`. `TestSidebarBrokerIntegration`, 3 tests:
-- `test_df_populated_with_seeded_event_values` — seeds 2 `lastfm` events + 2 `google_timeline`
-  places, calls the real `render_sidebar()`, asserts `session_state["df"]` has exactly 2 rows,
-  contains `"Artist0"`/`"Artist1"` in `artist` and `"Track0"`/`"Track1"` in `track`, non-null
-  `lat`/`lng` on every row.
-- `test_swarm_df_populated_with_seeded_place_values` — asserts `session_state["swarm_df"]` has
-  exactly 2 rows, `"Place0"`/`"Place1"` in `city`, and the exact seeded `(51.5074, -0.1278)`
-  lat/lng pair for Place0 survives the broker → adapter → session_state round-trip.
-- `test_date_text_is_genuine_usable_datetime64_column` — asserts `df["date_text"].dtype.kind ==
-  "M"` and that `.dt.date` (the exact operation `render_sidebar()`'s own date-filter widget
-  performs) works without raising.
-
-**Outcome — not a RED state**: all 3 tests passed immediately on first run against the real
-Subtask 1-3 implementations (no code changes needed to make them pass); `ruff check` on the new
-file is clean. Per the tester's report, assertions were not weakened to force a failure — this
-demonstrates the real composition (`get_events_frame`/`get_places_frame` → adapters →
-`apply_swarm_offsets` → session_state) is correct end-to-end, and the test file now serves as a
-regression guard rather than a RED-then-GREEN test. Status set directly to `GREEN` (skipping RED)
-to reflect this. The coder's remaining job for this subtask is the **manual verification**
-acceptance criteria (visual check of the running app, flythrough graceful-degradation check),
-the module-docstring update called out in Test Guidance, and a final full-suite regression run —
-none of which are covered by the automated test file above.
+HALT (test-ahead batch, 2026-07-07) — blocked on `Depends On: 3`. `core/source_filter.py` does not exist yet. This repo's established mocking convention patches names already present in the consuming module's namespace (e.g. `@patch("pages.geo_explorer.render_share_button")`); patching `pages.geo_explorer.get_source_options`/`filter_by_source` the same way isn't possible yet since that import doesn't exist in `pages/geo_explorer.py` until this subtask's own coder adds it, and pre-registering a fake `core.source_filter` module in `sys.modules` has no precedent in this suite and risks silently shadowing the real Subtask 3 implementation once it lands. Re-run this tester once Subtask 3 reaches `GREEN` (real `core/source_filter.py` will exist with its interface locked in by Subtask 3's own tests).
 
 **Implementation Notes**:
-
-**Store state**: `~/.localizer/store.duckdb` was already populated on this dev machine — no
-`localizer sync`/`localizer fetch` needed. Confirmed via
-`LocalizerStore.default_path()` → `C:\Users\johns\.localizer\store.duckdb`, `.exists()` → `True`.
-Row counts confirmed directly against the store: `query_places(source_id="google_timeline")` →
-3,076 rows (matches the task description exactly); `LocalizerBroker().get_places_frame()` → 10,905
-rows total (7,829 `swarm` + 3,076 `google_timeline`); `LocalizerBroker().get_events_frame()` →
-290,392 rows, all `source_id="lastfm"`. Also re-confirmed the editable-install fix from Subtask 3
-is still intact in this session: `import localizer` resolves to
-`.../agent-adb530a22a6adcac5/packages/localizer/src/localizer` (this worktree), not the main
-checkout.
-
-**The `>=1 lastfm event` question, resolved**: this store has 290,392 real `lastfm` events, so
-`_raw_df`/`df` populate normally through `apply_swarm_offsets` — the zero-lastfm-events
-degradation scenario flagged in the task prompt does not apply on this machine. Ran the adapter
-pipeline directly (`get_events_frame` → `events_to_lastfm_frame`, `get_places_frame` →
-`places_to_swarm_frame`, then `apply_swarm_offsets`) outside of Streamlit to get a value-level
-fix on what the map actually plots: `raw_df` has 290,392 rows and 3,548 unique `(lat, lng)` pairs;
-1,421 of those unique pairs come from `google_timeline` places; **838 of the unique points that
-actually appear in `raw_df` (the scrobble-map data) are `google_timeline`-sourced points** — i.e.
-Google Timeline data measurably changes what renders on the map, not just what's nominally in the
-store.
-
-**Which page(s) I checked, and why**: investigated both candidates named in the task.
-`pages/geo_explorer.py::render_geo_explorer()` reads **both** `df` (`music_df`, scrobbles) and
-`swarm_df` (`has_swarm` gate) and plots both as layers — this is the primary "map" page and the
-one the task's own Acceptance Criteria point at. `pages/places.py::render_checkin_insights()`
-("Check-in Insights" in the nav — labeled "Places" in code comments but not in the UI) reads
-`swarm_df` directly and is the more direct consumer of adapted `google_timeline` place data,
-since `google_timeline` never appears in `df`/events at all (it's places-only, no lastfm overlap
-by source). Checked both:
-- **Geo Explorer, 2D Map view** (default): "Listening locations" scrobble map rendered with
-  13,168 locations, 77,886 total plays, Top City "Laurel, MD (APL)". Both `Scrobbles` and
-  `Check-ins` data-layer pills were active by default in the Filter popover (`available_layers`
-  includes `"Check-ins"` since `has_swarm` is true).
-- **Geo Explorer, 3D Globe view**: stat row showed "Scrobble Locations: 4,972", "Total Scrobbles
-  (mapped): 290,392" (exact match to the `raw_df` row count computed independently above), and
-  **"Check-in Locations: 8,806"** — a real, non-zero count of place markers rendered, sourced from
-  `swarm_df` (which is `swarm` + `google_timeline` combined).
-- **Check-in Insights page** (reads `swarm_df` only, no scrobble data at all): "Check-ins across 1
-  countries" showed **10,905** — an exact match to `get_places_frame()`'s total unfiltered row
-  count (7,829 swarm + 3,076 google_timeline). The "Top 20 cities" bar chart's top two entries
-  were **"In passenger vehicle"** and **"Home"** — these are literally Google Timeline's
-  `place_type`/`place_name` activity labels (e.g. `activity:in_passenger_vehicle`, `home`) flowing
-  through `places_to_swarm_frame()`'s `place_name→city` rename and appearing as top-ranked "cities"
-  on a real rendered page. This is unambiguous, page-level, non-synthetic proof that Google
-  Timeline data specifically (not just Swarm) is present and visible on rendered UI — and it's a
-  live instance of Task Overview decision 1's already-accepted limitation (activity labels are not
-  administrative city names), observed for real rather than just reasoned about.
-
-**View mode used**: both 2D Map and 3D Globe were checked (see above); 2D Map is the default. Both
-render check-in/place data alongside scrobbles. Points genuinely appeared in both.
-
-**How I drove the app**: `chromium-cli` was not available in this environment (`which chromium-cli`
-found nothing). This repo already depends on `playwright` (used by `record_flythrough.py` itself,
-declared in `pyproject.toml`) and had Chromium already installed for it, so I used Playwright
-directly — a first-party tool already in this project's dependency tree, not a new one — to drive
-a real headless Chromium session against `streamlit run visualize.py --server.headless true
---server.port 8501`, navigate the actual page-nav links, click the actual segmented-control/filter
-widgets, and take full-page screenshots at each step. `console` "error"-type messages and
-`pageerror` events were captured for the whole session. This was genuine browser-level visual
-verification, not a Python-level session_state inspection substitute (though I also did the
-latter, independently, to get exact adapter-level numbers — see above). The one-off driver script
-and all screenshots were deleted after use; they were not committed (`git status --short` after
-cleanup shows only the expected source/test files, confirmed clean).
-
-**Console errors observed (pre-existing, unrelated to this plan)**: switching to the 3D Globe view
-logged two `deck: loading data of GeoJsonLayer(...)` console errors — `Unexpected token '<' ...
-SyntaxError: is not valid JSON` — consistent with a country/state boundary GeoJSON fetch getting an
-HTML (likely 404) response back instead of JSON in this environment. This is unrelated to
-`google_timeline`/broker-mode data (it's an overlay-boundary asset fetch, not scrobble/check-in
-data) and did not prevent the scrobble/check-in layers themselves from rendering with correct
-counts — flagging for awareness, not treating as a Subtask 4 blocker since it's outside this plan's
-files-to-touch and pre-dates this work.
-
-**Flythrough graceful-degradation check — result differs from the plan's prediction, in a way
-worth flagging but not blocking on**: clicked "▶ Record Flythrough" on the Geo Explorer 3D Globe
-view in the same broker-mode session (no legacy CSV/Swarm/Timeline paths configured).
-**The app did not crash** — confirmed the page remained fully interactive and responsive
-immediately after the click (all controls still clickable, no Python traceback, no blank/500
-page). However, the *specific* degradation differs from what Task Overview's documented limitation
-predicted: instead of `rec_status.update(label="Recording failed...", state="error")`, the widget
-showed **"Recording saved to: flythrough_<timestamp>.mp4"** (a false-positive success message) —
-and no such file was actually created on disk (`ls` confirmed). Root cause, traced by reading
-`record_flythrough.py`: `geo_explorer.py` passes `csv_path=""` (falsy) in broker mode, so
-`cmd` omits the positional csv argument entirely; `record_flythrough.py`'s own `main()` has a
-**pre-existing, independent fallback**: when no csv is given, `create_recording_assets()` searches
-`os.getenv("AUTOBIO_LASTFM_DATA_DIR", "data")` for a `*_tracks.csv` file (this worktree's `data/`
-dir has none — only `.gitkeep`), and when neither the file nor the fallback dir/file exists, it
-returns `(None, None)`. `main()`'s handling of that result — `if result is None: return` (never
-true, since `(None, None)` is a 2-tuple, not `None`) then `deck, keyframes = result; if not deck:
-return` — exits with return code 0 and prints nothing, so the subprocess's exit code alone (which
-`geo_explorer.py` uses to decide success vs failure) reports success even though nothing was
-recorded. **This is a pre-existing bug in `record_flythrough.py`'s `main()`, not something
-introduced by Subtasks 1-4** — it would reproduce identically today on `main` in the legacy path
-too, any time `create_recording_assets()` returns `(None, None)` for *any* reason (missing CSV,
-empty data dir, etc.), independent of broker mode. It is also explicitly out of this plan's scope
-per Task Overview ("Files never touched by this plan" lists `record_flythrough.py`). Net: the
-*required* acceptance criterion — the app does not crash — is satisfied; the *literal wording*
-about "an error is shown" is not, because the real failure mode is a silent false-positive success
-message rather than a visible error. Not fixing this (out of scope, pre-existing, no crash), but
-flagging clearly per instructions rather than silently treating the AC as fully met: **recommend a
-follow-up issue against `record_flythrough.py`'s `main()` to check `os.path.exists(args.output)`
-before reporting success, independent of this plan.**
-
-**Full-suite regression run**: `pytest --no-cov -q` (plain pytest collected normally — the
-documented `rtk proxy` fallback for "No tests collected" was not needed) — **865 passed, 0
-failed** (862 pre-existing + 3 new `TestSidebarBrokerIntegration` tests from this subtask, already
-GREEN per the tester's report — no regressions from the manual-verification work, which touched no
-source files, only a one-off script deleted before this run).
-
-No source files were modified for this subtask beyond what Subtasks 1-3 already delivered — the
-work here was verification only (per the Description's split: automated integration test already
-GREEN from the tester; this pass covered the remaining manual/non-automatable acceptance criteria).
-`components/sidebar.py`'s module docstring (Test Guidance's documentation-upkeep item) was already
-updated during Subtask 3 (verified: the "Broker mode" section and `_loaded_store_identity` session-
-state contract entry are both present at lines 1-45) — no further edit needed here.
-
-Status left at `GREEN` (not flipped to `APPROVED` — that's the owner's call) since no bug was found
-in the code delivered by this plan; the one real finding (record_flythrough.py's silent
-false-success) is a pre-existing, out-of-scope issue, not a defect in Subtasks 1-4's deliverable.
+(filled by coder agent)
 
 **Review Notes**:
-Code Review: APPROVED — full unscoped gate re-run from a clean venv activation: `ruff check .` —
-no issues found; `ruff format --check .` — 132 files already formatted; `mypy` (unscoped) —
-Success, no issues found; `pytest tests/test_sidebar_broker_integration.py -v --no-cov` — 3
-passed, 0 failed; full suite `rtk proxy python -m pytest --no-cov -q` — 865 passed, 0 failed (the
-plain `pytest` invocation hit the documented "No tests collected" rtk-hook quirk, so the `rtk
-proxy` fallback was used, matching the coder's own note that this fallback exists for that reason).
+(filled by owner agent)
 
-Read `tests/test_sidebar_broker_integration.py` in full and cross-checked its assertions against
-`tests/test_localizer_broker.py`'s `_seed_events`/`_seed_places` helpers: `_seed_events` produces
-`label="Artist{i}"`/`sublabel="Track{i}"`, and `_seed_places` produces `place_name="Place{i}"` with
-`lat=51.5074 + i*0.01`/`lng=-0.1278 + i*0.01` — so Place0 is exactly `(51.5074, -0.1278)`, the
-literal pair the test asserts appears in `swarm_df[["lat", "lng"]]`. All three tests assert
-specific values (`"Artist0"`/`"Artist1"` in `artist`, `"Track0"`/`"Track1"` in `track`, the exact
-`(51.5074, -0.1278)` tuple, `date_text.dtype.kind == "M"` plus a working `.dt.date` call) rather
-than shape/presence checks — satisfies Subtask 4's Test Guidance directive to assert on values, not
-just column existence.
+---
 
-Independently re-derived the row-count claims in Implementation Notes against the real
-`~/.localizer/store.duckdb` rather than trusting them: ran
-`LocalizerBroker().get_places_frame()`/`get_events_frame()` directly — got `places` = 10,905 total
-(7,829 `swarm` + 3,076 `google_timeline`) and `events` = 290,392 (all `lastfm`), an exact match to
-every number cited in Implementation Notes (the "10,905"/"7,829 swarm + 3,076 google_timeline" page
-count on Check-in Insights, the "290,392" scrobble count on the 3D Globe stat row, and the task's
-own "3,076 google_timeline rows" premise). The numbers are internally consistent and independently
-reproducible, not fabricated or misremembered.
+### Subtask 5 — Wire the source filter into Check-in Insights
 
-**Flythrough finding, scrutinized**: read `record_flythrough.py` in full. Confirmed the root-cause
-diagnosis is accurate: `main()`'s `result = create_recording_assets(...)` can return the 2-tuple
-`(None, None)` (lines 213/215/226/243 of `create_recording_assets`), so `if result is None: return`
-(line 455) never fires for that case; `deck, keyframes = result` unpacks to `(None, None)`, and
-`if not deck: return` (line 458) exits silently with code 0 and no printed output — meaning
-`pages/geo_explorer.py`'s `if proc.returncode == 0: rec_status.update(label=f"Recording saved to:
-{out_path}", state="complete")` (geo_explorer.py:503-504) reports false success. Confirmed via
-`git diff 8e9b1b5 -- record_flythrough.py` → empty diff: this file has zero changes on this branch,
-so the bug is not introduced by Subtasks 1-4. Confirmed `csv_path=""` in broker mode is itself
-expected, documented behavior — `geo_explorer.py:468`, `csv_path = loaded_config[0] if
-loaded_config else None`, and Task Overview's own "Explicit out-of-scope limitation" paragraph
-states index 0 is deliberately set to `""` in broker mode. The bug is a pure result-unpacking defect
-inside `main()` that reproduces identically in legacy mode any time `create_recording_assets()`
-returns `(None, None)` for any reason (e.g. a `data/` dir with no `*_tracks.csv`, independent of
-broker mode) — confirmed by reading `create_recording_assets()`'s four `return None, None` sites,
-none of which are broker-mode-specific. Root-cause diagnosis and pre-existing/out-of-scope framing
-both hold up under independent re-derivation.
+**Status**: RED
 
-**Severity assessment**: the required acceptance criterion — "does not crash the Streamlit app" —
-is genuinely satisfied (confirmed via the coder's Playwright-driven check and the code reading
-above: the exception never propagates past `main()`, so the subprocess just exits 0 with no
-output). The *literal wording* of "an error is shown" is not satisfied — the real behavior is a
-misleading false-positive success message. This is a legitimate UX bug (a user could believe a
-video was saved when it wasn't) that is one severity notch worse than the plan's original
-prediction, but it does not rise to a defect in Subtask 4's own deliverables: the automated test
-file's claims are accurate, and Implementation Notes describe the actual observed behavior
-precisely rather than glossing over the mismatch with the plan's prediction. Recommend the
-orchestrator/owner have a follow-up GitHub issue filed against `record_flythrough.py::main()`
-(check `os.path.exists(args.output)`, or equivalently treat a `(None, None)` result as a nonzero
-exit code, before reporting success) — this is a judgment call for the orchestrator/owner, not a
-blocker on Subtask 4.
+**PR Group**: geo-source-filter-ui
 
-No defects found in Subtask 4's own deliverables (test file or Implementation Notes claims).
-Status remains GREEN; owner may advance.
+**Depends On**: 3
 
-**Owner Review**: APPROVED. The deliverable genuinely satisfies the user's original ask: independent
-browser-driven verification (Playwright) against the real populated store confirms Google Timeline
-data renders on live pages, with exact row-count cross-checks against the live DuckDB store and
-unambiguous evidence (Google Timeline's own activity labels appearing on-screen). Gate is clean
-(865/865). The record_flythrough.py false-success finding is accepted as a pre-existing,
-out-of-scope bug (confirmed via `git diff` showing zero changes to that file on this branch, and
-Task Overview explicitly lists it as never touched by this plan) — shipping with a documented
-follow-up recommendation rather than blocking on it, since the plan's actual scope (wiring
-LocalizerBroker into the app) is fully and correctly delivered. Recommend the orchestrator open a
-follow-up GitHub issue against `record_flythrough.py::main()`'s silent-false-success bug after this
-plan's PR is merged.
+**Description**:
+Add the same filter pattern to `pages/places.py::render_checkin_insights()`. Immediately after the
+existing empty-state check (`if swarm_df is None or swarm_df.empty: ... return`), add
+`st.selectbox("Source", get_source_options(swarm_df), key="checkin_source_filter")` and apply
+`swarm_df = filter_by_source(swarm_df, selected_source)` before the shareable HTML export
+(`build_checkin_insights_html`) and the country/city `groupby` breakdowns — so the filter affects
+the exported HTML and both breakdown tables/charts consistently. If filtering narrows `swarm_df` to
+empty (e.g. a user selects a source with zero rows after some other future filter interacts with
+it), show an informative `st.info` message and return, rather than letting the country/city
+`groupby` calls run on an empty frame and render blank charts.
 
-**Plan-wide loose ends for the orchestrator's final commit/PR step**: PR #113 already merged
-Subtasks 1-2 (`localizer-broker-frame-adapters` PR group). Subtasks 3-4 (`wire-localizer-broker-into-app`
-PR group) are both now APPROVED but not yet committed or PR'd — `components/sidebar.py`,
-`tests/test_sidebar.py`, `tests/test_visualize.py`, and the new `tests/test_sidebar_broker_integration.py`
-are all still uncommitted in the worktree. All 4 subtasks across both PR groups are now APPROVED;
-`Plan Status` is being set to `COMPLETE` below. Next step: full-suite integration gate (already
-confirmed 865/865 clean), commit this second PR group, open its PR, and spawn the polisher.
+**Acceptance Criteria**:
+- [ ] With a mixed-source `swarm_df` and the selectbox mocked to return `"Swarm"`, the "By Country"
+  and "Top Cities" breakdown tables only reflect rows whose `source_id == "swarm"` — verified via a
+  specific country/city value present only in Google-Timeline-tagged rows being absent from the
+  output tables.
+- [ ] `build_checkin_insights_html()` is called with the filtered `swarm_df`, not the original
+  (verified via a mock call-arg inspection asserting the argument's row count/content matches the
+  filtered set).
+- [ ] With the selectbox mocked to return `"All"`, output row counts match the unfiltered
+  `swarm_df` exactly (no regression from today's behavior).
+- [ ] When `swarm_df` is `None` or empty (today's existing empty-state test), the existing `st.info`
+  empty-state message still fires and the function returns before the new selectbox is ever
+  called — zero behavior change for the no-data case.
+- [ ] Filtering down to zero rows (a source with no matching rows) shows an `st.info` message and
+  does not raise inside the `groupby("country")`/`groupby(["city", "country"])` calls.
 
-Status: APPROVED. Plan Status: COMPLETE.
+**Files to Touch**:
+- `pages/places.py` (edit: `render_checkin_insights()` — add gated `st.selectbox("Source", ...)`
+  after the empty-state check; apply `filter_by_source()` before the HTML export and both
+  breakdowns; handle the post-filter-empty case; import `get_source_options`, `filter_by_source`
+  from `core.source_filter`)
+- `tests/test_places.py` (new — no test file exists yet for `pages/places.py`; create one scoped to
+  `render_checkin_insights()` following this repo's existing Streamlit-mock conventions from
+  `tests/test_geo_explorer.py`)
+
+**Test Guidance**:
+- No existing test file covers `pages/places.py` at all (confirmed via repo-wide search) — the new
+  `tests/test_places.py` must include, at minimum: the pre-existing-equivalent empty-state test
+  (swarm_df `None`/empty → `st.info` shown, no crash), the "All" passthrough case, the "Swarm"-only
+  filtered case (with specific country/city presence/absence assertions), the HTML-export
+  call-argument assertion, and the post-filter-empty-result case.
+- Build a mixed-source fixture with at least one row's `country`/`city` unique to `"swarm"` and one
+  unique to `"google_timeline"` (parallel to Subtask 4's fixture design) so presence/absence
+  assertions are meaningful.
+- Follow this repo's existing `MagicMock`-based Streamlit mocking convention (see
+  `tests/test_geo_explorer.py`'s `_make_col_mock`/`_cols_side_effect` helpers) rather than
+  introducing a new mocking style.
+- No concurrency, network I/O, or database-write risk domains apply — pure Streamlit widget wiring
+  over an in-memory DataFrame plus an HTML-export function call.
+
+**Test Files**:
+`tests/test_places.py` (new — no prior test file existed for `pages/places.py`) — RED-confirmed (`pytest tests/test_places.py -v --no-cov`: 5 of 7 fail for genuine reasons tied to absent implementation; 2 empty-state regression guards pass today by design, per AC #4).
+- `TestRenderCheckinInsightsEmptyState::test_none_swarm_df_shows_info_and_skips_selectbox` (passes today — regression guard)
+- `TestRenderCheckinInsightsEmptyState::test_empty_swarm_df_shows_info_and_skips_selectbox` (passes today — regression guard)
+- `TestRenderCheckinInsightsSourceFilter::test_selectbox_populated_from_get_source_options` (RED)
+- `TestRenderCheckinInsightsSourceFilter::test_swarm_only_filter_narrows_country_and_city_breakdowns` (RED, AC #1)
+- `TestRenderCheckinInsightsSourceFilter::test_html_export_receives_filtered_dataframe` (RED, AC #2)
+- `TestRenderCheckinInsightsSourceFilter::test_all_selection_keeps_full_dataset` (RED, AC #3)
+- `TestRenderCheckinInsightsSourceFilter::test_post_filter_empty_shows_info_and_skips_breakdowns` (RED, AC #5)
+- Note: `core/source_filter.py` (Subtask 3) doesn't exist yet either, but this tester did not halt — it mocked `pages.places.get_source_options`/`pages.places.filter_by_source` with `create=True`, testing the integration (does `render_checkin_insights` call and thread these correctly) independent of Subtask 3's actual implementation, which has its own separate test coverage.
+
+**Implementation Notes**:
+(filled by coder agent)
+
+**Review Notes**:
+(filled by owner agent)
 
 ---

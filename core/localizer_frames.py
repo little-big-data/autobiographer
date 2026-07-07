@@ -28,6 +28,7 @@ SWARM_COLUMNS = [
     "lng",
     "event_category",
     "shout",
+    "source_id",
 ]
 
 
@@ -62,14 +63,16 @@ def places_to_swarm_frame(places_df: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         DataFrame with columns `timestamp, offset, city, state, country, venue,
-        venue_category, lat, lng, event_category, shout`, sorted ascending by
-        `timestamp` (required by `apply_swarm_offsets`'s binary search over
+        venue_category, lat, lng, event_category, shout, source_id`, sorted ascending
+        by `timestamp` (required by `apply_swarm_offsets`'s binary search over
         `swarm_df["timestamp"]`). `place_name` is copied into both `city` and `venue`;
         `place_type` is renamed to `venue_category`. `state`, `country`,
         `event_category`, `shout` default to `""` and `offset` defaults to `0`, since
-        the DuckDB places schema does not carry these. `source_id`, `place_name`, and
-        `place_type` are dropped — the legacy swarm_df shape has none of those. An
-        empty input returns an empty frame with exactly these columns, in this order.
+        the DuckDB places schema does not carry these. `source_id` is passed through
+        unchanged so downstream consumers can tell which source a row came from.
+        `place_name` and `place_type` are dropped — the legacy swarm_df shape has
+        neither of those. An empty input returns an empty frame with exactly these
+        columns, in this order.
     """
     if places_df.empty:
         return pd.DataFrame(columns=SWARM_COLUMNS)
@@ -87,6 +90,7 @@ def places_to_swarm_frame(places_df: pd.DataFrame) -> pd.DataFrame:
             "lng": places_df["lng"],
             "event_category": "",
             "shout": "",
+            "source_id": places_df["source_id"],
         }
     )
     return result.sort_values("timestamp", ascending=True).reset_index(drop=True)[SWARM_COLUMNS]
