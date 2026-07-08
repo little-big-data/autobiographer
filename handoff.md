@@ -1,7 +1,22 @@
 # Handoff
 
 ## Plan Status
-status: IN_PROGRESS
+status: COMPLETE
+
+**Final summary**: All 5 subtasks are `APPROVED`. This plan preserved `source_id` through
+both the broker (DuckDB) and legacy flat-file data pipelines (Subtasks 1 and 2, PR group
+`preserve-source-id`, already merged in a prior PR), added a shared, pure, Streamlit-free
+`core/source_filter.py` helper (Subtask 3), and wired a `st.selectbox("Source", …)` filter
+into both consuming pages — Geo Explorer (Subtask 4) and Check-in Insights (Subtask 5),
+PR group `geo-source-filter-ui` — so a user can now isolate Swarm/Foursquare check-ins from
+Google Timeline check-ins (or view "All") on both pages, with the filter consistently
+applied before map plotting, groupby aggregation, and the shareable HTML export. The
+full-suite gate (`python -m pytest`, no path filter) passed at 905/905 before this PR group
+was opened. Follow-up recommendation (out of scope, documented in the Task Overview): the
+same `core/source_filter.py` helper could be extended to `pages/overview.py`,
+`pages/life_in_chapters.py`, `pages/listening_lifestyle.py`, and `pages/insights.py`, which
+all read `swarm_df` for derived analytics but were intentionally left untouched here to
+keep the diff focused.
 
 ## Task Overview
 
@@ -121,7 +136,7 @@ round. The out-of-scope rationale (excluding overview.py, life_in_chapters.py,
 listening_lifestyle.py, insights.py, data_sources.py) still holds. Plan is ready to proceed.
 
 ## Current Subtask
-current: 3
+current: 5
 
 ---
 
@@ -520,7 +535,7 @@ Proceeding per AGENTS.md "After each subtask is APPROVED" §4 (full PR-group clo
 
 ### Subtask 3 — Shared pure source-filter helper (`core/source_filter.py`)
 
-**Status**: RED
+**Status**: APPROVED
 
 **PR Group**: geo-source-filter-ui
 
@@ -587,16 +602,163 @@ DataFrame-out logic, independently testable with hand-built fixtures, mirroring
 20 tests covering all 6 ACs plus edge cases: `test_source_label_known_swarm`, `test_source_label_known_google_timeline`, `test_source_label_unknown_humanized_fallback_first_example`, `test_source_label_unknown_humanized_fallback_second_example`, `test_get_source_options_none_input_returns_all_only`, `test_get_source_options_empty_dataframe_returns_all_only`, `test_get_source_options_missing_source_id_column_returns_all_only`, `test_get_source_options_mixed_sources_sorted_after_all`, `test_get_source_options_single_distinct_source_value`, `test_filter_by_source_none_input_returns_none`, `test_filter_by_source_empty_dataframe_returns_unchanged`, `test_filter_by_source_all_label_mixed_source_row_count_unchanged`, `test_filter_by_source_all_label_no_source_id_row_count_unchanged`, `test_filter_by_source_missing_source_id_column_is_graceful_passthrough`, `test_filter_by_source_swarm_label_returns_only_swarm_rows_row_for_row`, `test_filter_by_source_google_timeline_label_returns_only_those_rows`, `test_filter_by_source_nonexistent_label_returns_empty_but_correctly_shaped`, `test_filter_by_source_result_has_reset_index`, `test_filter_by_source_does_not_mutate_input_in_place`, `test_source_filter_module_has_no_forbidden_imports`.
 
 **Implementation Notes**:
-(filled by coder agent)
+Created `core/source_filter.py` (new) with the three pure functions specified in the
+plan, mirroring `core/localizer_frames.py`'s module docstring/style convention:
+
+- `SOURCE_LABELS = {"swarm": "Swarm", "google_timeline": "Google Timeline"}` module-level
+  dict.
+- `source_label(source_id)` — `SOURCE_LABELS.get(source_id, source_id.replace("_", "
+  ").title())`.
+- `get_source_options(swarm_df)` — returns `["All"]` when `swarm_df` is `None`, empty,
+  or lacks a `source_id` column; otherwise `["All", *sorted({source_label(sid) for sid
+  in swarm_df["source_id"]})]` (sorted, de-duplicated labels via a set comprehension).
+- `filter_by_source(swarm_df, selected_label)` — returns `swarm_df` unchanged for
+  `None`/empty input, `selected_label == "All"`, or a missing `source_id` column
+  (graceful passthrough in all three cases, checked before any filtering logic runs).
+  Otherwise builds a boolean mask via `swarm_df["source_id"].map(source_label) ==
+  selected_label` and returns `swarm_df[mask].reset_index(drop=True)` — boolean-mask
+  indexing plus `reset_index` naturally avoids mutating the input (confirmed by the
+  `test_filter_by_source_does_not_mutate_input_in_place` test).
+
+The test file (`tests/test_source_filter.py`) was already written by the tester agent in
+the RED phase with all 20 tests; no test-file edits were needed or made in this GREEN
+phase.
+
+Ran `python -m pytest tests/test_source_filter.py -v --no-cov`: 20 passed, 0 failed.
+Ran the scoped set including Subtasks 1 and 2's GREEN/APPROVED tests: `python -m pytest
+tests/test_source_filter.py tests/test_localizer_frames.py tests/test_sidebar.py -v
+--no-cov`: 42 passed, 0 failed.
+
+Ran `python -m ruff check core/source_filter.py tests/test_source_filter.py`: all checks
+passed. Ran `python -m ruff format --check core/source_filter.py
+tests/test_source_filter.py`: `ruff format` initially flagged `core/source_filter.py`
+for one long function signature line; ran `python -m ruff format core/source_filter.py`
+to auto-fix it (wrapped `filter_by_source`'s signature across lines), then re-ran the
+full scoped pytest set above to confirm no regression from the reformat (still 42
+passed) before re-confirming `ruff format --check` clean on both files. Ran `python -m
+mypy core/source_filter.py`: no issues found.
+
+No deviations from the plan; no files touched beyond `core/source_filter.py` (the
+`Files to Touch` list's test-file entry was already created by the tester in the RED
+phase).
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — checks clean
+
+Automated checks (scoped to the current subtask's Test Files entry
+(`tests/test_source_filter.py`) plus Subtasks 1 and 2's GREEN/APPROVED test files
+(`tests/test_localizer_frames.py`, `tests/test_sidebar.py`); no other subtask is yet
+GREEN/APPROVED — `tests/test_places.py` exists on disk from the test-ahead batch but
+Subtask 5 is still `RED`, so it is correctly excluded from this scoped run):
+- `python -m ruff check core/source_filter.py tests/test_source_filter.py` — All checks passed!
+- `python -m ruff format --check core/source_filter.py tests/test_source_filter.py` — 2 files already formatted
+- `python -m mypy core/source_filter.py` — no issues found
+- `python -m pytest tests/test_source_filter.py tests/test_localizer_frames.py tests/test_sidebar.py -v --no-cov` — 42 passed, 0 failed
+
+Diff review (`core/source_filter.py` and `tests/test_source_filter.py` are new files,
+read in full): no dead code, no commented-out blocks, no secrets/tokens, no N+1 or
+hot-path synchronous-call concerns (pure in-memory pandas/dict logic, no I/O). Module
+docstring and per-function docstrings match the plan's spec. `SOURCE_LABELS` dict and
+all three functions match the Description's exact signatures.
+
+Focused check on the two flagged risk areas:
+- **No mutation of input**: `filter_by_source()`'s only non-passthrough path builds a
+  boolean mask via `.map()` (which allocates a new Series) and indexes with
+  `swarm_df[mask].reset_index(drop=True)` — boolean-mask fancy indexing returns a new
+  DataFrame in pandas, never a view, so the original is never written to.
+  `test_filter_by_source_does_not_mutate_input_in_place` exercises exactly this path
+  (label `"Swarm"` against the mixed-source fixture) and passes. The three passthrough
+  branches (`None`/empty, `"All"`, missing `source_id` column) return the identical
+  input object by reference rather than a defensive copy — this matches the spec's
+  literal wording ("returns `swarm_df` unchanged") and no AC or test requires a copy on
+  the passthrough path, so this is not a defect, just worth the owner's awareness if a
+  future caller ever mutates a passthrough result in place.
+- **Graceful passthrough for None/empty/missing-column**: verified row-by-row against
+  the implementation — `get_source_options()` checks `swarm_df is None or
+  swarm_df.empty or "source_id" not in swarm_df.columns` in one guard (all three
+  return `["All"]`); `filter_by_source()` checks `None`/empty first (returns
+  `swarm_df` as-is, so `None` stays `None` rather than erroring on `.empty`), then
+  checks `selected_label == "All" or "source_id" not in swarm_df.columns` (also
+  passthrough). No branch can raise on these inputs — confirmed by
+  `test_get_source_options_none_input_returns_all_only`,
+  `..._empty_dataframe_returns_all_only`, `..._missing_source_id_column_returns_all_only`,
+  `test_filter_by_source_none_input_returns_none`,
+  `test_filter_by_source_empty_dataframe_returns_unchanged`, and
+  `test_filter_by_source_missing_source_id_column_is_graceful_passthrough`, all passing.
+
+All 6 Acceptance Criteria verified against the test file and passing run:
+- AC #1 (`get_source_options` → `["All"]` for None/empty/missing-column) — 3 dedicated
+  tests, all passing.
+- AC #2 (mixed sources → `["All", "Google Timeline", "Swarm"]`, alphabetical after
+  `"All"`) — `test_get_source_options_mixed_sources_sorted_after_all`, passing.
+- AC #3 (`filter_by_source(df, "All")` row-count-unchanged, with and without
+  `source_id`) — 2 dedicated tests, passing.
+- AC #4 (`"Swarm"` filter on 4-row mixed fixture → exactly the 2 swarm rows,
+  row-for-row) — `test_filter_by_source_swarm_label_returns_only_swarm_rows_row_for_row`,
+  passing (checks specific lat/lng per city, not just counts).
+- AC #5 (nonexistent label → empty-but-correctly-shaped, not raising/unfiltered) —
+  `test_filter_by_source_nonexistent_label_returns_empty_but_correctly_shaped`, passing.
+- AC #6 (`source_label` known + 2 unknown-fallback examples) — 4 dedicated tests
+  (`swarm`, `google_timeline`, and two differently-shaped unknown inputs), passing.
+
+No issues found that require reversal to RED.
+
+Owner Review: APPROVED — Independently re-verified, not just re-reading the code-review notes:
+
+- Read `core/source_filter.py` and `tests/test_source_filter.py` in full. Traced all three
+  functions by hand: `source_label()` is a one-line dict lookup with a humanized fallback;
+  `get_source_options()`'s single guard (`None`/empty/missing-column) correctly short-circuits
+  to `["All"]` before touching `swarm_df["source_id"]`, and the non-guard path builds a
+  `set`-deduped, `sorted()` label list prepended with `"All"` — matches AC #1/#2 exactly.
+  `filter_by_source()`'s two guards (`None`/empty first, then `"All"`/missing-column) both
+  return the original object by reference (never touching `.map()`), and the remaining path
+  builds a boolean mask via `.map(source_label)` and returns `swarm_df[mask].reset_index(drop=True)`
+  — boolean-mask fancy indexing always allocates a new frame in pandas, so the input is never
+  mutated, confirmed against `test_filter_by_source_does_not_mutate_input_in_place`.
+- Re-ran all checks myself rather than trusting the notes above: `python -m pytest
+  tests/test_source_filter.py tests/test_localizer_frames.py tests/test_sidebar.py -v --no-cov`
+  → 42 passed, 0 failed. `python -m ruff check core/source_filter.py tests/test_source_filter.py`
+  → all checks passed. `python -m ruff format --check core/source_filter.py
+  tests/test_source_filter.py` → 2 files already formatted. `python -m mypy core/source_filter.py`
+  → no issues found (confirmed `core` is in `[tool.mypy] files` in `pyproject.toml`, so this file
+  is actually type-checked, not silently skipped).
+- Steelmanned the one candidate concern (passthrough branches return the same object reference
+  rather than a defensive copy): the spec's literal wording is "returns `swarm_df` unchanged,"
+  no AC or Test Guidance item requires a copy, and no consuming subtask (4/5) is documented to
+  mutate a passthrough result — retracting this as a non-issue, matching the code reviewer's
+  same conclusion.
+- Test Guidance coverage checked item-by-item against the test file: all three functions covered
+  independently with hand-built fixtures (no `LocalizerBroker`/Streamlit involvement) — confirmed.
+  Graceful-passthrough edge cases (`None`, empty DataFrame, missing `source_id` column,
+  single-distinct-value column) — all four present as dedicated tests. Unknown-label fallback
+  tested with two differently-shaped inputs (`some_future_plugin`, `custom_data_source`) —
+  present. No-mutation-in-place test — present and passing. No gaps found.
+- All 6 Acceptance Criteria independently re-verified against the passing test run: AC #1 (3
+  dedicated `get_source_options` tests), AC #2 (`test_get_source_options_mixed_sources_sorted_after_all`),
+  AC #3 (2 dedicated `filter_by_source(df, "All")` tests), AC #4
+  (`test_filter_by_source_swarm_label_returns_only_swarm_rows_row_for_row`, which checks specific
+  lat/lng per city, not just counts), AC #5
+  (`test_filter_by_source_nonexistent_label_returns_empty_but_correctly_shaped`), AC #6 (4
+  `source_label` tests covering both known values and two unknown-fallback examples).
+- Simplicity/naming/style: no dead code, no premature abstraction, three small pure functions
+  exactly matching the plan's spec; naming (`source_label`, `get_source_options`,
+  `filter_by_source`) is clear and mirrors `core/localizer_frames.py`'s existing pure-adapter
+  convention. No domain-specific risk patterns apply (no concurrency, network I/O, LLM parsing,
+  background jobs, or DB writes in this module).
+
+Note for the orchestrator: this subtask's approval unblocks Subtask 4, whose tester HALTed
+earlier specifically because `core/source_filter.py` did not exist yet (see Subtask 4's
+`Test Files` entry). Subtask 4's tester should now be re-run to write its RED tests against
+this now-real module before the coder proceeds on Subtask 4.
+
+This does not close the `geo-source-filter-ui` PR group — Subtask 4 is still `NEW`/blocked and
+Subtask 5 is still `RED`. Advancing `current` per the standard single-subtask owner workflow.
 
 ---
 
 ### Subtask 4 — Wire the source filter into Geo Explorer
 
-**Status**: NEW
+**Status**: APPROVED
 
 **PR Group**: geo-source-filter-ui
 
@@ -674,19 +836,220 @@ doesn't exist today.
   already used throughout this file suffices.
 
 **Test Files**:
-HALT (test-ahead batch, 2026-07-07) — blocked on `Depends On: 3`. `core/source_filter.py` does not exist yet. This repo's established mocking convention patches names already present in the consuming module's namespace (e.g. `@patch("pages.geo_explorer.render_share_button")`); patching `pages.geo_explorer.get_source_options`/`filter_by_source` the same way isn't possible yet since that import doesn't exist in `pages/geo_explorer.py` until this subtask's own coder adds it, and pre-registering a fake `core.source_filter` module in `sys.modules` has no precedent in this suite and risks silently shadowing the real Subtask 3 implementation once it lands. Re-run this tester once Subtask 3 reaches `GREEN` (real `core/source_filter.py` will exist with its interface locked in by Subtask 3's own tests).
+`tests/test_geo_explorer.py` (edit — appended new test classes; zero modification to any
+pre-existing test method) — RED-confirmed (`python -m pytest tests/test_geo_explorer.py -v
+--no-cov`: 40 collected, 35 passed / 5 failed; baseline before this change was 30 passed, 0
+failed, confirming all 30 pre-existing tests still pass unmodified and exactly 10 new tests
+were added). `core/source_filter.py` now exists (Subtask 3 is `APPROVED`), but per the task's
+instruction, `pages.geo_explorer.get_source_options`/`filter_by_source` are mocked with
+`create=True` at the consuming module's namespace (the import doesn't exist in
+`pages/geo_explorer.py` yet) — this tests the page's *wiring* to the helper, independent of
+`core/source_filter.py`'s own implementation (already covered by `tests/test_source_filter.py`).
+
+New test classes:
+- `TestGeoExplorerSourceFilterGating` (2 tests, both pass today by design — regression/gating
+  guards, per the same "passes today" pattern already established in Subtask 5):
+  - `test_source_selectbox_not_called_when_swarm_df_none`
+  - `test_source_selectbox_not_called_when_swarm_df_empty`
+- `TestGeoExplorer2DMapSourceFilterWiring` (4 tests, all RED):
+  - `test_swarm_selection_filters_checkin_dots_by_artist_mode` — RED: `filter_by_source`
+    never called (0 times)
+  - `test_swarm_selection_filters_checkin_dots_by_city_mode` — RED: unfiltered swarm_df (2
+    rows) reaches `_render_2d_map` instead of the filtered 1 row (`2 != 1`)
+  - `test_all_selection_keeps_full_checkin_dataset` — RED: `filter_by_source` never called
+    (strengthened from an initially-vacuous pass so it's a genuine pre-implementation failure,
+    not just a coincidental row-count match)
+  - `test_selectbox_populated_from_get_source_options` — RED: `get_source_options` never
+    called (0 times)
+- `TestGeoExplorer3DGlobeSourceFilterWiring` (1 test, RED):
+  - `test_swarm_selection_filters_checkin_dots_in_3d_view` — RED: `filter_by_source` never
+    called (0 times); proves the same filtered swarm_df must reach `_render_3d_globe`, the
+    second independent consumption point
+- `TestCityStatsRemainMusicDfOnly` (3 tests, all pass today by design — AC #5 regression
+  guards against a future coder wiring `swarm_df` into the scrobble-only city-breakdown path):
+  - `test_build_city_stats_takes_single_positional_df_argument`
+  - `test_render_city_breakdown_takes_single_music_df_argument`
+  - `test_render_atlas_city_detail_has_no_swarm_df_argument`
+
+`ruff check tests/test_geo_explorer.py` — all checks passed.
+
+Prior HALT (test-ahead batch, 2026-07-07) resolved: was blocked on `Depends On: 3` because
+`core/source_filter.py` did not exist yet. Subtask 3 is now `APPROVED` and this re-run tester
+pass wrote the RED tests above.
 
 **Implementation Notes**:
-(filled by coder agent)
+In `pages/geo_explorer.py`, added `from core.source_filter import filter_by_source,
+get_source_options` to the module-level imports (alphabetically placed between the
+`components.theme` and `pages.artist_geography` imports, mirroring the existing import
+ordering convention).
+
+Inside `render_geo_explorer()`'s existing "⚡ Filter" popover, added:
+```python
+if has_swarm and swarm_df is not None:
+    selected_source = st.selectbox(
+        "Source", get_source_options(swarm_df), key="geo_source_filter"
+    )
+```
+placed immediately after the existing `has_music`-gated Artist selectbox, mirroring its
+gating pattern exactly. A `selected_source = "All"` default was added alongside the
+existing `selected_artist = "All"` default (used when `has_swarm` is False, so the later
+unconditional filter call still has a defined value).
+
+Immediately after the existing `music_df` date/artist filtering block (right before the
+"Share button" section), added a single unconditional line:
+```python
+swarm_df = filter_by_source(swarm_df, selected_source)
+```
+This is safe to call unconditionally (even when `has_swarm` is False, i.e. `swarm_df` is
+`None`/empty) because `filter_by_source()` (Subtask 3) gracefully passes through
+`None`/empty/`"All"`/missing-`source_id` inputs without raising — confirmed by
+`core/source_filter.py`'s own test suite (`tests/test_source_filter.py`, all passing).
+Both `_render_3d_globe` and `_render_2d_map` are called further down with this same
+(possibly-filtered) `swarm_df` local variable, so both view-dispatch branches
+automatically see the filtered frame — no per-view-mode duplication of filtering logic,
+as required by the plan.
+
+`_build_city_stats()`, `_render_city_breakdown()`, and `_render_atlas_city_detail()` were
+not touched at all — confirmed no lines in this diff fall within their function bodies;
+they continue to receive only `music_df` and remain untouched, matching AC #5's
+regression guard (`TestCityStatsRemainMusicDfOnly`'s three signature-inspection tests all
+pass unmodified).
+
+The test file (`tests/test_geo_explorer.py`) was already written by the tester agent in
+the RED phase (`TestGeoExplorerSourceFilterGating`,
+`TestGeoExplorer2DMapSourceFilterWiring`, `TestGeoExplorer3DGlobeSourceFilterWiring`,
+`TestCityStatsRemainMusicDfOnly`); no test-file edits were made in this GREEN phase.
+
+No deviations from the plan; no files touched beyond `pages/geo_explorer.py` (the test
+file was already written by the tester).
+
+Ran `python -m pytest tests/test_geo_explorer.py -v --no-cov`: 40 passed, 0 failed (30
+pre-existing tests unmodified and passing + all 10 new tests from this subtask, zero
+regressions — exactly the pass count the tester reported as the target).
+
+Ran the scoped set including Subtasks 1, 2, and 3's GREEN/APPROVED tests: `python -m
+pytest tests/test_geo_explorer.py tests/test_localizer_frames.py tests/test_sidebar.py
+tests/test_source_filter.py -v --no-cov`: 82 passed, 0 failed.
+
+Ran `python -m ruff check pages/geo_explorer.py`: all checks passed. Ran `python -m ruff
+format --check pages/geo_explorer.py`: 1 file already formatted, no changes needed. Ran
+`python -m mypy pages/geo_explorer.py`: no issues found.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: APPROVED — checks clean
+
+Automated checks (scoped to the current subtask's Test Files entry
+(`tests/test_geo_explorer.py`) plus Subtasks 1, 2, and 3's GREEN/APPROVED test files
+(`tests/test_localizer_frames.py`, `tests/test_sidebar.py`, `tests/test_source_filter.py`);
+Subtask 5's `tests/test_places.py` is excluded since Subtask 5 is still `RED`):
+- `python -m ruff check pages/geo_explorer.py tests/test_geo_explorer.py` — All checks passed!
+- `python -m ruff format --check pages/geo_explorer.py tests/test_geo_explorer.py` — 2 files already formatted
+- `python -m mypy pages/geo_explorer.py` — no issues found
+- `python -m pytest tests/test_geo_explorer.py tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py -v --no-cov` — 82 passed, 0 failed
+
+Diff review (`git diff HEAD -- pages/geo_explorer.py`, +9/-0, read in full alongside
+surrounding context lines 1100-1240): matches the plan exactly. One new import
+(`from core.source_filter import filter_by_source, get_source_options`, alphabetically
+placed), a `selected_source = "All"` default alongside the existing `selected_artist`
+default, the gated `if has_swarm and swarm_df is not None:` selectbox block placed
+directly after the `has_music`-gated Artist selectbox (mirroring its pattern exactly),
+and a single unconditional `swarm_df = filter_by_source(swarm_df, selected_source)` line
+placed after the `music_df` date/artist filtering block and before the Share button
+section. No dead code, no commented-out blocks, no secrets/tokens, no N+1 or hot-path
+synchronous-call concerns (pure in-memory Streamlit widget wiring over DataFrames).
+
+Focused check on the two flagged risk areas:
+- **AC #5 (city-stats regression guard)**: grepped every `swarm_df` reference in the
+  file — all occurrences fall in `_render_3d_globe` (lines 253-281),
+  `_render_2d_map` (lines 512-564), and `render_geo_explorer` itself (lines 1049-1236).
+  None fall within `_build_city_stats` (794-869), `_render_atlas_city_detail` (871-946),
+  or `_render_city_breakdown` (992-1036) — confirmed via `git diff`, which shows zero
+  changed lines in that range, and via `inspect.signature` checks
+  (`test_build_city_stats_takes_single_positional_df_argument`,
+  `test_render_city_breakdown_takes_single_music_df_argument`,
+  `test_render_atlas_city_detail_has_no_swarm_df_argument`), all passing. This is the
+  exact defect the plan-review round flagged and it is fully closed — zero diff in that
+  code path.
+- **AC #3 (selectbox never called when `has_swarm` is False)**: the implementation's
+  gate is `if has_swarm and swarm_df is not None:` (line 1132), matching
+  `TestGeoExplorerSourceFilterGating`'s two tests
+  (`test_source_selectbox_not_called_when_swarm_df_none`,
+  `test_source_selectbox_not_called_when_swarm_df_empty`), both of which assert — via
+  `_assert_source_selectbox_never_called` — that no `st.selectbox` call in the entire
+  render was made with `"Source"` as its first positional arg (not merely that a shared
+  mock wasn't called at all, which would be a weaker/vacuous check since the same
+  `st.selectbox` mock also serves the Artist selectbox). Both tests pass.
+
+Reviewed the remaining three Acceptance Criteria against non-vacuous, specific
+assertions (not just row counts):
+- AC #1/#2 (Swarm-only filter reaches `_render_2d_map`/`_render_3d_globe`'s dot layers
+  in both "By Artist" and "By City" modes; "All" is a true passthrough) —
+  `test_swarm_selection_filters_checkin_dots_by_artist_mode`,
+  `..._by_city_mode`, and `test_swarm_selection_filters_checkin_dots_in_3d_view` each
+  assert a specific Swarm-only lat value (64.13) is present and the
+  Google-Timeline-only lat value (52.52) is absent from what reaches the render
+  function — not just a row-count match. `test_all_selection_keeps_full_checkin_dataset`
+  explicitly asserts `filter_by_source` was still called (not vacuously skipped) even
+  though "All" leaves the row count unchanged, avoiding a coincidental-pass trap.
+- AC #4 (pre-existing tests unmodified) — confirmed via the pytest run: 30 pre-existing
+  + 10 new = 40 tests in this file, all passing, matching the coder's reported count
+  exactly.
+
+No issues found that require reversal to RED. Ready for the owner agent.
+
+Owner Review: APPROVED — Independently re-verified, not just re-reading the code-review notes:
+
+- Read `pages/geo_explorer.py`'s diff in full (`git diff HEAD -- pages/geo_explorer.py`, +9/-0,
+  purely additive) and traced the actual data flow by hand: `selected_source` defaults to
+  `"All"`; the gated `if has_swarm and swarm_df is not None:` selectbox block (lines 1132-1135)
+  mirrors the existing `has_music`-gated Artist selectbox exactly; the unconditional
+  `swarm_df = filter_by_source(swarm_df, selected_source)` (line 1208) runs once, right before
+  view dispatch (lines 1224-1240), and both `_render_3d_globe` and `_render_2d_map` receive this
+  same filtered local variable positionally — confirmed by reading the dispatch call sites
+  directly, not inferring from the coder's notes.
+- Read `_build_city_stats(df)` (single param `df`), `_render_city_breakdown(music_df)` (single
+  param `music_df`), and `_render_atlas_city_detail(city, city_stats, full_df)` (no `swarm_df`
+  param) directly via their function definitions — all three match
+  `TestCityStatsRemainMusicDfOnly`'s signature-inspection assertions exactly, closing AC #5's
+  regression guard with zero diff in that code range.
+- Re-ran the scoped test suite independently: `python -m pytest tests/test_geo_explorer.py
+  tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py -v --no-cov`
+  → 82 passed, 0 failed. `python -m ruff check pages/geo_explorer.py tests/test_geo_explorer.py`
+  → all checks passed. `python -m ruff format --check pages/geo_explorer.py
+  tests/test_geo_explorer.py` → 2 files already formatted. `python -m mypy pages/geo_explorer.py`
+  → no issues found.
+- Confirmed via `git diff HEAD -- tests/test_geo_explorer.py` that the 495-line test-file diff is
+  purely additive (0 deleted lines; the file's line count went from 482 to 977) — AC #4's "zero
+  modification to existing assertions" claim holds exactly, not just by count-matching.
+- Read the new test classes (`TestGeoExplorerSourceFilterGating`,
+  `TestGeoExplorer2DMapSourceFilterWiring`, `TestGeoExplorer3DGlobeSourceFilterWiring`,
+  `TestCityStatsRemainMusicDfOnly`) in full: assertions check specific lat values (64.13 present,
+  52.52 absent) and exact row counts reaching `_render_2d_map`/`_render_3d_globe`, not just
+  "something changed" — non-vacuous per Test Guidance. `test_all_selection_keeps_full_checkin_dataset`
+  explicitly asserts `filter_by_source` was called even though "All" leaves row count unchanged,
+  avoiding a coincidental-pass trap.
+- All 5 Acceptance Criteria independently verified: AC #1/#2 (Swarm-only and "All" filtering
+  reaching both render functions, verified by specific lat presence/absence and row counts), AC #3
+  (`TestGeoExplorerSourceFilterGating`'s two gating tests), AC #4 (diff-confirmed zero
+  modification to pre-existing tests), AC #5 (signature-inspection tests matching the untouched
+  city-stats code path).
+- Simplicity/naming/style: the diff is minimal (+9 lines), no dead code, no premature
+  abstraction — `selected_source` mirrors the existing `selected_artist` naming and gating
+  convention exactly. No domain-specific risk patterns apply (pure Streamlit widget wiring over
+  in-memory DataFrames; no concurrency, network I/O, LLM parsing, background jobs, or DB writes).
+
+This subtask does not close the `geo-source-filter-ui` PR group — Subtask 5 is still `RED`.
+Advancing `current` to 5 per the standard owner workflow.
+
+**Housekeeping note**: Subtask 5's section below was missing its `### Subtask 5 — ...` heading
+(its fields ran on directly after this subtask's Review Notes with no section separator) — added
+the missing heading below as a structural fix; no content was changed.
 
 ---
 
 ### Subtask 5 — Wire the source filter into Check-in Insights
 
-**Status**: RED
+**Status**: APPROVED
 
 **PR Group**: geo-source-filter-ui
 
@@ -755,9 +1118,283 @@ it), show an informative `st.info` message and return, rather than letting the c
 - Note: `core/source_filter.py` (Subtask 3) doesn't exist yet either, but this tester did not halt — it mocked `pages.places.get_source_options`/`pages.places.filter_by_source` with `create=True`, testing the integration (does `render_checkin_insights` call and thread these correctly) independent of Subtask 3's actual implementation, which has its own separate test coverage.
 
 **Implementation Notes**:
-(filled by coder agent)
+In `pages/places.py`, added `from core.source_filter import filter_by_source,
+get_source_options` to the module imports (alphabetically placed between
+`components.theme` and `export_html`, mirroring the existing import ordering
+convention — `core.source_filter` sorts between them).
+
+Inside `render_checkin_insights()`, immediately after the existing empty-state
+check (`if swarm_df is None or swarm_df.empty: ... return`), added:
+```python
+selected_source = st.selectbox("Source", get_source_options(swarm_df))
+swarm_df = filter_by_source(swarm_df, selected_source)
+
+if swarm_df is None or swarm_df.empty:
+    st.info("No check-ins match the selected source filter.")
+    return
+```
+The reassigned (possibly-filtered) `swarm_df` local variable then flows
+unchanged into the existing `build_checkin_insights_html()` call, the "By
+Country" `groupby("country")`, and the "Top Cities"
+`groupby(["city", "country"])` — all three now see only the filtered rows, and
+in a single place, matching the plan's "filter once, before every consumer"
+requirement.
+
+**One deviation from the plan's literal wording, required to satisfy the
+pre-written test**: the Description said to call
+`st.selectbox("Source", get_source_options(swarm_df), key="checkin_source_filter")`.
+However, `tests/test_places.py::TestRenderCheckinInsightsSourceFilter::test_selectbox_populated_from_get_source_options`
+asserts `mock_sel.assert_any_call("Source", ["All", "Google Timeline", "Swarm"])` —
+`Mock.assert_any_call` performs strict equality on the full call signature
+(positional args *and* kwargs), so a call carrying an extra `key=...` kwarg
+would not match this assertion and the test would fail. Since I must not
+modify the test file, I omitted the `key` kwarg — `st.selectbox("Source",
+get_source_options(swarm_df))` — which is safe in practice because this is
+the only `st.selectbox` call in `render_checkin_insights()` (no risk of a
+duplicate-widget-ID collision that a `key` would otherwise guard against).
+Flagging this for the owner's awareness since it's a deliberate, test-driven
+departure from the Description's literal code sample, not an oversight.
+
+No other files were touched beyond `pages/places.py`; `tests/test_places.py`
+was already fully written by the tester agent in the RED phase and was not
+modified in this GREEN pass.
+
+Ran `python -m pytest tests/test_places.py -v --no-cov`: 7 passed, 0 failed
+(2 pre-existing-equivalent empty-state regression guards + 5 new tests, all
+green).
+
+Ran the scoped set (this subtask's tests plus every `GREEN`/`APPROVED`
+subtask's tests — Subtasks 1-4): `python -m pytest tests/test_places.py
+tests/test_geo_explorer.py tests/test_localizer_frames.py tests/test_sidebar.py
+tests/test_source_filter.py -v --no-cov`: 89 passed, 0 failed.
+
+Ran `python -m ruff check pages/places.py tests/test_places.py`: all checks
+passed. Ran `python -m ruff format --check pages/places.py
+tests/test_places.py`: `pages/places.py` already formatted; `tests/test_places.py`
+flags one pre-existing long-line wrap (line 245,
+`pd.testing.assert_frame_equal(html_arg.reset_index(...), filtered.reset_index(...))`)
+that predates this coder pass — confirmed via `git status` that
+`tests/test_places.py` is untracked and was not edited by me in this pass, so
+this is not a new violation introduced by my work and, per this task's
+explicit instruction not to modify the test file, was left as-is. Ran
+`python -m mypy pages/places.py`: no issues found.
 
 **Review Notes**:
-(filled by owner agent)
+Code Review: NEEDS_REVISION — automated checks + two scrutiny items below; status reverted GREEN → RED.
+
+Automated checks (scoped to this subtask's `tests/test_places.py` plus Subtasks 1-4's
+GREEN/APPROVED test files):
+- `python -m ruff check pages/places.py tests/test_places.py` — All checks passed!
+- `python -m ruff format --check pages/places.py tests/test_places.py` — **FAILS**:
+  `pages/places.py` already formatted, but `tests/test_places.py` "would reformat" (1 file).
+  `ruff format --diff` shows the offending block is at line ~245 (the
+  `pd.testing.assert_frame_equal(html_arg.reset_index(...), filtered.reset_index(...))` call
+  in `test_html_export_receives_filtered_dataframe`), which ruff wants wrapped across lines.
+- `python -m mypy pages/places.py` — no issues found
+- `python -m pytest tests/test_places.py tests/test_geo_explorer.py tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py --no-cov -q` — 89 passed, 0 failed
+
+Finding 1 — ruff format gate is not clean, and the coder's rationale for leaving it doesn't
+hold. CLAUDE.md's Local Quality Gate (Section 7, Step 2) requires `ruff format --check .` to
+pass with **zero errors** before any commit — there is no carve-out for "pre-existing" or
+"not my file" formatting debt. The coder's notes call this "not their file to edit per task
+scope," but `tests/test_places.py` is explicitly listed as a **new** file under this
+subtask's own "Files to Touch" (no test file for `pages/places.py` existed before this
+subtask) — it was created by the tester agent in this same subtask's RED phase, not
+inherited from an earlier subtask. There is no other-subtask ownership conflict here; it is
+squarely in scope and must be reformatted (`python -m ruff format tests/test_places.py`)
+before this subtask can be approved. This is a mechanical, test-semantics-neutral fix (ruff
+only rewraps the `assert_frame_equal(...)` call across lines) — it does not require
+re-litigating any test's assertions, consistent with the task's instruction that a test-only
+formatting fix doesn't need to reopen test-semantics debate.
+
+Finding 2 — the `key="checkin_source_filter"` omission is not an acceptable trade-off as
+implemented; the test itself has the gap, and the coder's own analogous sibling subtask
+(Subtask 4) already demonstrates the correct fix. Comparing the two subtasks' identically-named
+tests directly:
+- `tests/test_geo_explorer.py::TestGeoExplorer2DMapSourceFilterWiring::test_selectbox_populated_from_get_source_options`
+  (lines 835-865) asserts via `source_calls = [c for c in mock_sel.call_args_list if c.args and
+  c.args[0] == "Source"]` then checks `source_calls[0].args[1] == mock_get_opts.return_value` —
+  a positional-args-only check that tolerates an extra `key=...` kwarg on the same call. That
+  page's implementation *does* pass `key="geo_source_filter"` (confirmed in Subtask 4's already
+  `APPROVED` diff) and its test passes cleanly.
+- `tests/test_places.py::TestRenderCheckinInsightsSourceFilter::test_selectbox_populated_from_get_source_options`
+  (line 142) instead asserts `mock_sel.assert_any_call("Source", ["All", "Google Timeline",
+  "Swarm"])` — `assert_any_call` requires an **exact** match of the full call signature
+  (positional args and kwargs together), so it is strictly weaker/more brittle than the
+  pattern already established one subtask earlier for the identical scenario, not an
+  unavoidable constraint of Mock's API.
+- CLAUDE.md's Streamlit Conventions section calls for "explicit `session_state` keys" for
+  widget state; the subtask's own Description explicitly specified
+  `key="checkin_source_filter"` in its code sample, matching Subtask 4's already-approved
+  `key="geo_source_filter"` precedent. Dropping the key is a real, if currently low-risk,
+  inconsistency between the two sibling pages implementing the same feature — today there's
+  no second `st.selectbox` call in `render_checkin_insights()` to collide with, but that's an
+  accident of the current function body, not a designed guarantee, and it leaves this page
+  unable to participate in any future explicit-`session_state`-keyed rerun/refresh logic
+  without a follow-up patch.
+- Per the task's own framing: this is a "silently accept the weaker test as the reason to
+  drop a documented convention" situation, not a legitimate, agreed-upon deviation.
+  **Required fix**: rewrite `test_selectbox_populated_from_get_source_options`'s final
+  assertion in `tests/test_places.py` to use the same positional-args-tolerant pattern already
+  used in `tests/test_geo_explorer.py` (filter `mock_sel.call_args_list` for the `"Source"`
+  call and check its `args[1]`, ignoring `kwargs`), then add
+  `key="checkin_source_filter"` to the `st.selectbox(...)` call in
+  `pages/places.py::render_checkin_insights()` to match the plan's literal Description and
+  Subtask 4's precedent.
+
+Diff review otherwise (`git diff HEAD -- pages/places.py`, +11/-1): no dead code, no
+commented-out blocks, no secrets/tokens, no N+1 or hot-path synchronous-call concerns (pure
+in-memory Streamlit widget wiring plus one DataFrame filter call). The post-filter-empty
+guard (`if swarm_df is None or swarm_df.empty: st.info(...); return`) correctly precedes the
+HTML export and both groupby breakdowns, satisfying AC #5's "must not raise inside groupby"
+requirement. AC #1-#4 are otherwise well covered by non-vacuous assertions (specific
+country/city presence/absence, `assert_frame_equal` on the HTML-export call arg, "All"
+passthrough row-count check, and the pre-existing empty-state regression guard) — these do
+not need rework, only the two findings above.
+
+Status reverted RED so the coder can: (1) run `ruff format tests/test_places.py` to close
+the formatting gate, and (2) loosen the selectbox-call assertion to the established
+tolerant pattern and add the `key=` kwarg back to the implementation. Both are small,
+mechanical changes; nothing else in this subtask needs to change.
+
+**Implementation Notes (revision pass)**: Applied both required fixes exactly as
+diagnosed by the reviewer, with no other changes:
+
+1. **Ruff format**: Ran `python -m ruff format tests/test_places.py pages/places.py` —
+   reformatted `tests/test_places.py` (the long `assert_frame_equal(...)` call around
+   line 245 was rewrapped across lines by ruff mechanically); `pages/places.py` was
+   already formatted, left unchanged. Re-ran `python -m pytest tests/test_places.py -v
+   --no-cov` afterward to confirm the reformat didn't alter test semantics: still 7
+   passed, 0 failed.
+
+2. **`key=` kwarg restoration**: In `tests/test_places.py::TestRenderCheckinInsightsSourceFilter::test_selectbox_populated_from_get_source_options`,
+   replaced the strict `mock_sel.assert_any_call("Source", ["All", "Google Timeline",
+   "Swarm"])` with the same positional-args-tolerant pattern already used in
+   `tests/test_geo_explorer.py::TestGeoExplorer2DMapSourceFilterWiring::test_selectbox_populated_from_get_source_options`
+   (lines 835-865 there): filter `mock_sel.call_args_list` for the call whose
+   `c.args[0] == "Source"`, assert exactly one such call exists, then assert only on
+   `args[1]` (the options list), tolerant of any kwargs on that call. Then restored
+   `key="checkin_source_filter"` to the `st.selectbox(...)` call in
+   `pages/places.py::render_checkin_insights()`, matching the subtask's original
+   Description and Subtask 4's already-approved `key="geo_source_filter"` precedent.
+
+No other files or tests were touched; both fixes are exactly the mechanical/test-only
+changes the reviewer specified, with zero re-litigation of any other assertion.
+
+Verification run after both fixes:
+- `python -m pytest tests/test_places.py -v --no-cov` — 7 passed, 0 failed.
+- `python -m ruff check pages/places.py tests/test_places.py` — All checks passed!
+- `python -m ruff format --check pages/places.py tests/test_places.py` — 2 files already formatted.
+- `python -m mypy pages/places.py` — no issues found.
+- Scoped set: `python -m pytest tests/test_places.py tests/test_geo_explorer.py
+  tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py -v
+  --no-cov` — 89 passed, 0 failed (no regressions in any sibling subtask's tests).
+
+Code Review: APPROVED (re-review) — Both fixes from the prior NEEDS_REVISION round were
+independently re-verified directly against the files on disk, not just re-read from the
+coder's notes, and the full subtask was re-reviewed end to end, not just the two flagged
+points:
+
+- **Fix 1 (ruff format)**: `python -m ruff format --check pages/places.py
+  tests/test_places.py` — "2 files already formatted." The previously-offending
+  `assert_frame_equal(...)` wrap at the old line ~245 is resolved.
+- **Fix 2 (`key=` kwarg + tolerant assertion)**: confirmed via `Grep` that
+  `pages/places.py` lines 499-501 read
+  `st.selectbox("Source", get_source_options(swarm_df), key="checkin_source_filter")` —
+  the key is restored, matching the subtask's Description and Subtask 4's
+  `key="geo_source_filter"` precedent. Confirmed via `Read` that
+  `tests/test_places.py::TestRenderCheckinInsightsSourceFilter::test_selectbox_populated_from_get_source_options`
+  (lines 142-144) now filters `mock_sel.call_args_list` for the call whose
+  `c.args[0] == "Source"` and asserts only on `args[1]`, tolerant of the `key=` kwarg —
+  the same pattern used in `tests/test_geo_explorer.py`.
+
+Automated checks, re-run directly rather than trusting prior output:
+- `python -m ruff check pages/places.py tests/test_places.py` — All checks passed!
+- `python -m ruff format --check pages/places.py tests/test_places.py` — 2 files already formatted
+- `python -m mypy pages/places.py` — no issues found
+- `python -m pytest tests/test_places.py tests/test_geo_explorer.py
+  tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py -v
+  --no-cov` — 89 passed, 0 failed
+
+Full-subtask diff re-review (`git diff HEAD -- pages/places.py`, +13/-1, read in full):
+one new import (`from core.source_filter import filter_by_source, get_source_options`,
+alphabetically placed), a docstring update describing the new filter behavior, the gated
+`st.selectbox(...)`/`filter_by_source(...)` pair immediately after the existing
+empty-state check, and a post-filter-empty guard (`if swarm_df is None or
+swarm_df.empty: st.info(...); return`) placed before `build_checkin_insights_html()` and
+both `groupby` breakdowns — satisfying AC #5. No dead code, no commented-out blocks, no
+secrets/tokens, no N+1 or hot-path synchronous-call concerns (pure in-memory Streamlit
+widget wiring plus one DataFrame filter call). All 5 Acceptance Criteria remain covered by
+non-vacuous assertions in `tests/test_places.py` (specific country/city presence/absence
+for AC #1, `assert_frame_equal` on the HTML-export call arg for AC #2, "All" passthrough
+row-count check for AC #3, the pre-existing empty-state regression guard for AC #4, and
+the post-filter-empty guard test for AC #5) — nothing regressed elsewhere in this pass.
+
+No issues found. Ready for the owner agent.
+
+Owner Review: APPROVED — Independently re-verified, not just re-reading the code-review notes:
+
+- Read `pages/places.py` in full and `git diff HEAD -- pages/places.py` (+13/-1, purely
+  additive): one new import (`from core.source_filter import filter_by_source,
+  get_source_options`, alphabetically placed), a docstring update, the gated
+  `st.selectbox("Source", get_source_options(swarm_df), key="checkin_source_filter")` /
+  `filter_by_source(swarm_df, selected_source)` pair immediately after the existing
+  empty-state check, and a post-filter-empty guard (`if swarm_df is None or
+  swarm_df.empty: st.info(...); return`) placed before `build_checkin_insights_html()` and
+  both `groupby` breakdowns. The `key=` kwarg matches Subtask 4's `key="geo_source_filter"`
+  precedent, closing the finding from the earlier NEEDS_REVISION round.
+- Read `tests/test_places.py` in full (brand-new file, not just the two areas the last
+  review round touched). Traced each of the 7 tests against the implementation by hand:
+  - `TestRenderCheckinInsightsEmptyState`'s two tests confirm the new selectbox is never
+    reached when `swarm_df` is `None`/empty — matches AC #4, and the early-return happens
+    before line 499 in the source, confirmed by reading the code.
+  - `test_selectbox_populated_from_get_source_options` asserts `get_source_options` was
+    called with the original (unfiltered) `swarm_df` and that exactly one `st.selectbox`
+    call used `"Source"` as its first arg with the mocked options list as its second —
+    tolerant of the `key=` kwarg, avoiding the brittleness the prior review round flagged.
+  - `test_swarm_only_filter_narrows_country_and_city_breakdowns` traces that
+    `filter_by_source` is called with the *original* `swarm_df` and label `"Swarm"`, and
+    that both `px.bar` calls (country, city) only see the two swarm-tagged rows — verified
+    via presence of Iceland/Germany/Reykjavik/Berlin and absence of UK/France/London/Paris,
+    not just row counts. This is a non-vacuous check of AC #1.
+  - `test_html_export_receives_filtered_dataframe` confirms `build_checkin_insights_html`
+    receives the filtered (2-row) frame via `assert_frame_equal`, satisfying AC #2.
+  - `test_all_selection_keeps_full_dataset` confirms `filter_by_source` is still called
+    (with `"All"`) even though the row count is unchanged — avoiding a coincidental-pass
+    trap — satisfying AC #3.
+  - `test_post_filter_empty_shows_info_and_skips_breakdowns` confirms an `st.info` fires
+    and neither `px.bar` nor `build_checkin_insights_html` are called when the filtered
+    frame is empty, satisfying AC #5 without any groupby exception occurring (the test
+    would fail with an uncaught error otherwise).
+- Re-ran every check myself rather than trusting the notes above:
+  `python -m pytest tests/test_places.py tests/test_geo_explorer.py
+  tests/test_localizer_frames.py tests/test_sidebar.py tests/test_source_filter.py -v
+  --no-cov` → 89 passed, 0 failed. `python -m ruff check pages/places.py
+  tests/test_places.py` → all checks passed. `python -m ruff format --check
+  pages/places.py tests/test_places.py` → 2 files already formatted. `python -m mypy
+  pages/places.py` → no issues found (noting, as with Subtask 4, that `pages/` is not in
+  `pyproject.toml`'s `[tool.mypy] files` list, so the project's bare `mypy` gate does not
+  actually check this file — a pre-existing repo-wide gap unrelated to this diff, already
+  accepted at Subtask 4's approval).
+- Test Guidance coverage checked item-by-item: pre-existing-equivalent empty-state test,
+  "All" passthrough, "Swarm"-only filtered case with presence/absence assertions, HTML-export
+  call-argument assertion, and post-filter-empty case are all present. Mixed-source fixture
+  has country/city values unique to each source (Reykjavik/Iceland, Berlin/Germany vs.
+  London/UK, Paris/France). The existing `_make_col_mock`/`_cols_side_effect` mocking
+  convention from `tests/test_geo_explorer.py` is followed, not a new style. No gaps found.
+- Simplicity/naming/style: diff is minimal (+13/-1), no dead code, no premature
+  abstraction — `selected_source` mirrors `pages/geo_explorer.py`'s naming exactly. No
+  domain-specific risk patterns apply (pure Streamlit widget wiring over an in-memory
+  DataFrame plus one HTML-export call; no concurrency, network I/O, LLM parsing,
+  background jobs, or DB writes).
+- All 5 Acceptance Criteria independently verified against the passing test run and the
+  traced code paths above.
+
+This is the last subtask in the plan and the second/final subtask in the
+`geo-source-filter-ui` PR group. Both subtasks in that group (4 and 5) are now
+`APPROVED`, closing the group. Per AGENTS.md "After each subtask is APPROVED" §4, ran the
+full-suite integration gate before proceeding: `python -m pytest` (no path filter) → 905
+passed, 0 failed, exit code 0. `python -m ruff check .` → all checks passed. `python -m
+ruff format --check .` → 135 files already formatted. Proceeding to branch/commit/PR.
 
 ---

@@ -43,6 +43,7 @@ from components.theme import (
     SEQUENTIAL_SCALE,
     apply_dark_theme,
 )
+from core.source_filter import filter_by_source, get_source_options
 from pages.artist_geography import (
     build_artist_city_table,
     build_map_data,
@@ -1110,6 +1111,7 @@ def render_geo_explorer() -> None:
 
     selected_layers: list[str] = []
     selected_artist = "All"
+    selected_source = "All"
     date_range: tuple = ()
 
     with filt_col:
@@ -1126,6 +1128,11 @@ def render_geo_explorer() -> None:
             if has_music and df is not None:
                 artists = ["All"] + sorted(df["artist"].dropna().unique().tolist())
                 selected_artist = st.selectbox("Artist", artists, key="geo_artist")
+
+            if has_swarm and swarm_df is not None:
+                selected_source = st.selectbox(
+                    "Source", get_source_options(swarm_df), key="geo_source_filter"
+                )
 
             if has_music and df is not None:
                 min_date = df["date_text"].min().date()
@@ -1197,6 +1204,8 @@ def render_geo_explorer() -> None:
         ]
     if music_df is not None and selected_artist != "All":
         music_df = music_df[music_df["artist"] == selected_artist]
+
+    swarm_df = filter_by_source(swarm_df, selected_source)
 
     # ── Share button (scrobble views only) ────────────────────────────────────
     if view in (_VIEW_2D, _VIEW_US) and music_df is not None and not music_df.empty:
