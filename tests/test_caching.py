@@ -63,6 +63,28 @@ class TestCaching(unittest.TestCase):
         key2 = get_cache_key(self.lastfm_file, self.swarm_dir)
         self.assertNotEqual(key1, key2)
 
+    def test_cache_key_changes_with_timeline_path(self):
+        timeline_file = os.path.join(self.test_dir, "Timeline.json")
+        with open(timeline_file, "w") as f:
+            f.write('{"semanticSegments": []}')
+
+        key_without = get_cache_key(self.lastfm_file, self.swarm_dir)
+        key_with = get_cache_key(self.lastfm_file, self.swarm_dir, timeline_path=timeline_file)
+        self.assertNotEqual(key_without, key_with)
+
+    def test_cache_key_changes_on_timeline_update(self):
+        timeline_file = os.path.join(self.test_dir, "Timeline.json")
+        with open(timeline_file, "w") as f:
+            f.write('{"semanticSegments": []}')
+        key1 = get_cache_key(self.lastfm_file, self.swarm_dir, timeline_path=timeline_file)
+
+        time.sleep(1.1)
+        with open(timeline_file, "a") as f:
+            f.write(" ")
+
+        key2 = get_cache_key(self.lastfm_file, self.swarm_dir, timeline_path=timeline_file)
+        self.assertNotEqual(key1, key2)
+
     def test_save_and_load_cache(self):
         key = get_cache_key(self.lastfm_file, self.swarm_dir)
         save_to_cache(self.df, key, cache_dir=self.cache_dir)

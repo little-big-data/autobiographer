@@ -137,6 +137,77 @@ def test_sources_shows_manual_mode(tmp_db: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subtask 2: GoogleTimelinePlugin registration in load_builtin_plugins()
+# ---------------------------------------------------------------------------
+#
+# These tests are expected to FAIL (RED) until the coder:
+#   - imports GoogleTimelinePlugin in
+#     packages/localizer/src/localizer/plugins/__init__.py::load_builtin_plugins()
+#   - assigns REGISTRY[GoogleTimelinePlugin.PLUGIN_ID] = GoogleTimelinePlugin
+#
+# They depend on Subtask 1's GoogleTimelinePlugin class
+# (packages/localizer/src/localizer/plugins/google_timeline/loader.py) existing,
+# which is implemented separately. Until that module exists, the REGISTRY-level
+# test below fails with ModuleNotFoundError (an acceptable RED reason at this
+# stage) rather than an assertion failure.
+
+
+def test_sources_lists_google_timeline(tmp_db: Path) -> None:
+    """localizer sources output must list google_timeline as MANUAL / places.
+
+    Mirrors test_sources_lists_swarm / test_sources_shows_manual_mode. Asserts
+    the exact "{plugin_id}  {mode_name}  {table_names}" line format used by
+    sources_cmd() in cli.py, so both the fetch mode and output table acceptance
+    criteria are covered in one test.
+    """
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db)}
+    result = runner.invoke(cli, ["sources"], env=env)
+    assert result.exit_code == 0, result.output
+    assert "google_timeline" in result.output
+    assert "google_timeline  MANUAL  places" in result.output
+
+
+def test_google_timeline_plugin_is_registered() -> None:
+    """After load_builtin_plugins(), REGISTRY['google_timeline'] must map to GoogleTimelinePlugin.
+
+    Mirrors test_swarm_plugin_is_registered in test_swarm_plugin.py.
+    """
+    from localizer.plugins import REGISTRY, load_builtin_plugins
+    from localizer.plugins.google_timeline.loader import GoogleTimelinePlugin
+
+    REGISTRY.clear()
+    load_builtin_plugins()
+    assert "google_timeline" in REGISTRY, (
+        "Expected 'google_timeline' key in REGISTRY after load_builtin_plugins()"
+    )
+    assert REGISTRY["google_timeline"] is GoogleTimelinePlugin
+
+
+def test_other_plugins_still_registered_alongside_google_timeline() -> None:
+    """Registering google_timeline must not disturb any existing plugin's entry.
+
+    Regression check called out in Subtask 2's Test Guidance: every other
+    builtin plugin must still be present in REGISTRY, unmodified, once
+    google_timeline is wired in.
+    """
+    from localizer.plugins import REGISTRY, load_builtin_plugins
+
+    REGISTRY.clear()
+    load_builtin_plugins()
+    for expected_id in (
+        "swarm",
+        "lastfm",
+        "github",
+        "feedly",
+        "rss",
+        "letterboxd",
+        "google_timeline",
+    ):
+        assert expected_id in REGISTRY, f"Expected {expected_id!r} in REGISTRY"
+
+
+# ---------------------------------------------------------------------------
 # 6. status shows record counts
 # ---------------------------------------------------------------------------
 

@@ -124,6 +124,10 @@ class TestSidebarDataLoading(unittest.TestCase):
             patch("components.sidebar.load_builtin_plugins"),
             patch("components.sidebar.load_config_into_session_state"),
             patch("components.sidebar.get_plugin_config_from_session", return_value={}),
+            # Force the legacy path regardless of whether this machine has a
+            # real ~/.localizer/store.duckdb — this test exercises the
+            # no-file-path legacy branch specifically.
+            patch("components.sidebar._broker_store_identity", return_value=None),
         ):
             from components.sidebar import render_sidebar
 
@@ -144,6 +148,9 @@ class TestSidebarDataLoading(unittest.TestCase):
             patch("components.sidebar.load_builtin_plugins"),
             patch("components.sidebar.load_config_into_session_state"),
             patch("components.sidebar.get_plugin_config_from_session", return_value={}),
+            # Force the legacy path regardless of whether this machine has a
+            # real ~/.localizer/store.duckdb.
+            patch("components.sidebar._broker_store_identity", return_value=None),
         ):
             from components.sidebar import render_sidebar
 
@@ -156,7 +163,7 @@ class TestSidebarDataLoading(unittest.TestCase):
         import pandas as pd
 
         raw_df = pd.DataFrame({"date_text": pd.to_datetime(["2024-01-01"])})
-        config = ("/path/to/file.csv", "", "default_assumptions.json")
+        config = ("/path/to/file.csv", "", "default_assumptions.json", "")
         plugin_cls = MagicMock(return_value=MagicMock())
         plugin_cls.return_value.get_config_fields.return_value = [
             {"key": "data_path", "label": "CSV", "type": "file_path"}
@@ -180,6 +187,9 @@ class TestSidebarDataLoading(unittest.TestCase):
             patch("components.sidebar._load_data_with_progress") as mock_load,
             patch("streamlit.sidebar") as mock_sidebar,
             patch("localizer.settings.LocalizerSettings", mock_ls),
+            # Force the legacy path regardless of whether this machine has a
+            # real ~/.localizer/store.duckdb.
+            patch("components.sidebar._broker_store_identity", return_value=None),
         ):
             mock_sidebar.date_input.return_value = [
                 raw_df["date_text"].min().date(),
@@ -224,6 +234,9 @@ class TestSidebarDataLoading(unittest.TestCase):
                 "components.sidebar._load_data_with_progress", side_effect=fake_load
             ) as mock_load,
             patch("streamlit.sidebar") as mock_sidebar,
+            # Force the legacy path regardless of whether this machine has a
+            # real ~/.localizer/store.duckdb.
+            patch("components.sidebar._broker_store_identity", return_value=None),
         ):
             mock_sidebar.date_input.return_value = [
                 raw_df["date_text"].min().date(),

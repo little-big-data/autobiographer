@@ -7,6 +7,11 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pandas as pd
+from localizer.plugins.google_timeline.parser import (  # noqa: F401
+    _WHERE_WHEN_COLUMNS,
+    _parse_latlng,
+    load_google_timeline,
+)
 
 
 def _get_ruptures() -> Optional[Any]:
@@ -20,7 +25,10 @@ def _get_ruptures() -> Optional[Any]:
 
 
 def get_cache_key(
-    lastfm_file: str, swarm_dir: Optional[str] = None, assumptions_file: Optional[str] = None
+    lastfm_file: str,
+    swarm_dir: Optional[str] = None,
+    assumptions_file: Optional[str] = None,
+    timeline_path: str = "",
 ) -> str:
     """Generate a unique cache key based on input files and their modification times."""
     if not os.path.exists(lastfm_file):
@@ -39,6 +47,10 @@ def get_cache_key(
     if assumptions_file and os.path.exists(assumptions_file):
         key_parts.append(assumptions_file)
         key_parts.append(str(os.path.getmtime(assumptions_file)))
+
+    if timeline_path and os.path.exists(timeline_path):
+        key_parts.append(timeline_path)
+        key_parts.append(str(os.path.getmtime(timeline_path)))
 
     # Include version to invalidate cache if logic changes
     key_parts.append("v1.6")
