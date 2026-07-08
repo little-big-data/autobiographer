@@ -38,6 +38,7 @@ SWARM_COLUMNS = [
     "lng",
     "event_category",
     "shout",
+    "source_id",
 ]
 
 
@@ -174,11 +175,19 @@ def test_places_to_swarm_frame_renames_and_fills_defaults():
     """city and venue both equal place_name; venue_category equals place_type; defaults filled."""
     result = places_to_swarm_frame(_places_fixture_out_of_order())
 
-    assert set(result.columns) == set(SWARM_COLUMNS)
+    assert list(result.columns) == SWARM_COLUMNS
     assert len(result) == 3
-    assert "source_id" not in result.columns
     assert "place_name" not in result.columns
     assert "place_type" not in result.columns
+
+    # source_id must be present (not dropped) and correct row-for-row, post-sort.
+    # Input order (latest, earliest, middle) -> sorted ascending order:
+    # earliest="swarm", middle="google_timeline", latest="google_timeline".
+    assert "source_id" in result.columns
+    rows = result.reset_index(drop=True)
+    assert rows.iloc[0]["source_id"] == "swarm"
+    assert rows.iloc[1]["source_id"] == "google_timeline"
+    assert rows.iloc[2]["source_id"] == "google_timeline"
 
     for _, row in result.iterrows():
         assert row["state"] == ""
@@ -201,14 +210,17 @@ def test_places_to_swarm_frame_sorted_ascending_by_timestamp():
     assert rows.iloc[0]["city"] == "Joe's Pizza"
     assert rows.iloc[0]["venue"] == "Joe's Pizza"
     assert rows.iloc[0]["venue_category"] == "restaurant"
+    assert rows.iloc[0]["source_id"] == "swarm"
 
     assert rows.iloc[1]["city"] == ""
     assert rows.iloc[1]["venue"] == ""
     assert rows.iloc[1]["venue_category"] == "unknown"
+    assert rows.iloc[1]["source_id"] == "google_timeline"
 
     assert rows.iloc[2]["city"] == "Home"
     assert rows.iloc[2]["venue"] == "Home"
     assert rows.iloc[2]["venue_category"] == "residence"
+    assert rows.iloc[2]["source_id"] == "google_timeline"
 
 
 def test_places_to_swarm_frame_empty_place_name_not_coerced_to_nan():
@@ -261,6 +273,7 @@ def test_places_to_swarm_frame_single_row():
     assert result.iloc[0]["state"] == ""
     assert result.iloc[0]["country"] == ""
     assert result.iloc[0]["offset"] == 0
+    assert result.iloc[0]["source_id"] == "google_timeline"
 
 
 def test_places_to_swarm_frame_empty_input_exact_columns():
@@ -272,6 +285,35 @@ def test_places_to_swarm_frame_empty_input_exact_columns():
 
     assert list(result.columns) == SWARM_COLUMNS
     assert len(result) == 0
+
+
+def _places_fixture_same_source() -> pd.DataFrame:
+    """Three-row places fixture where every row shares the same source_id.
+
+    Proves the source_id passthrough doesn't accidentally collapse or dedupe rows
+    that all happen to share one source — a naive `.drop_duplicates()` or a
+    groupby-first implementation would silently lose rows here.
+    """
+    return pd.DataFrame(
+        {
+            "timestamp": [1700000000, 1700003600, 1700007200],
+            "lat": [10.0, 20.0, 30.0],
+            "lng": [-10.0, -20.0, -30.0],
+            "place_name": ["Place A", "Place B", "Place C"],
+            "place_type": ["cafe", "park", "museum"],
+            "source_id": ["swarm", "swarm", "swarm"],
+        }
+    )
+
+
+def test_places_to_swarm_frame_same_source_id_not_collapsed():
+    """All-identical source_id values must not cause rows to be dropped or merged."""
+    result = places_to_swarm_frame(_places_fixture_same_source())
+
+    assert len(result) == 3
+    assert result["source_id"].tolist() == ["swarm", "swarm", "swarm"]
+    # Distinct rows are still individually present (not deduped away).
+    assert set(result["city"].tolist()) == {"Place A", "Place B", "Place C"}
 
 
 # ---------------------------------------------------------------------------

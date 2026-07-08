@@ -70,6 +70,39 @@ class TestLoadDataCombination(unittest.TestCase):
         combined = state["swarm_df"]
         self.assertEqual(list(combined["timestamp"]), [100, 300])
 
+    def test_source_id_tagged_per_row_when_both_sources_present(self):
+        """Subtask 2 AC #1: each row's source_id matches its origin loader.
+
+        Cross-references specific timestamp values from each mocked loader's
+        fixture (self.swarm_df has timestamps 100/300, self.timeline_df has
+        timestamps 200/400) rather than just checking two distinct values
+        exist somewhere in the column.
+        """
+        state = self._run("Timeline.json")
+        combined = state["swarm_df"]
+        self.assertIn(
+            "source_id",
+            combined.columns,
+            "swarm_df has no 'source_id' column — sidebar._load_data_with_progress() "
+            "must tag rows with their origin before concatenation.",
+        )
+        by_timestamp = combined.set_index("timestamp")["source_id"]
+        self.assertEqual(by_timestamp[100], "swarm")
+        self.assertEqual(by_timestamp[300], "swarm")
+        self.assertEqual(by_timestamp[200], "google_timeline")
+        self.assertEqual(by_timestamp[400], "google_timeline")
+
+    def test_source_id_all_swarm_when_only_swarm_dir_configured(self):
+        """Subtask 2 AC #2: with no timeline_path, every row is tagged 'swarm'."""
+        state = self._run("")
+        combined = state["swarm_df"]
+        self.assertIn(
+            "source_id",
+            combined.columns,
+            "swarm_df has no 'source_id' column when only swarm_dir is configured.",
+        )
+        self.assertEqual(list(combined["source_id"]), ["swarm", "swarm"])
+
 
 class TestBrokerModeWiring(unittest.TestCase):
     """Subtask 3: render_sidebar() must branch into a DuckDB-backed load path when
