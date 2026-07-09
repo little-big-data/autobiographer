@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -475,6 +476,500 @@ class TestCityBreakdown(unittest.TestCase):
                         render_geo_explorer()
 
         mock_plotly.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Subtask 4 — source filter wiring (pages/geo_explorer.py x core/source_filter.py)
+# ---------------------------------------------------------------------------
+
+
+def _make_mixed_source_swarm_df() -> pd.DataFrame:
+    """Two check-ins, one per source, each with a source-unique lat/lng.
+
+    Reykjavik (64.13, -21.82) is tagged "swarm"; Berlin (52.52, 13.405) is
+    tagged "google_timeline" — chosen so presence/absence assertions can check
+    specific coordinates, not just row counts (per Test Guidance).
+    """
+    return pd.DataFrame(
+        {
+            "city": ["Reykjavik", "Berlin"],
+            "country": ["Iceland", "Germany"],
+            "lat": [64.13, 52.52],
+            "lng": [-21.82, 13.405],
+            "source_id": ["swarm", "google_timeline"],
+        }
+    )
+
+
+def _stub_filter_by_source(df: pd.DataFrame | None, label: str) -> pd.DataFrame | None:
+    """Local stand-in mirroring core.source_filter.filter_by_source's contract.
+
+    Deliberately re-implemented here (not imported from core.source_filter) so
+    these tests exercise pages.geo_explorer's *wiring* to the helper,
+    independent of core/source_filter.py's own implementation — that module
+    has its own dedicated, already-passing test coverage in
+    tests/test_source_filter.py (Subtask 3).
+    """
+    if df is None or df.empty or label == "All":
+        return df
+    key = "swarm" if label == "Swarm" else "google_timeline"
+    return df[df["source_id"] == key].reset_index(drop=True)
+
+
+class TestGeoExplorerSourceFilterGating(unittest.TestCase):
+    """AC #3 — the Source selectbox must never appear when there are no check-ins.
+
+    Both tests here pass today (pre-implementation) by construction: the
+    Source selectbox doesn't exist yet, so it is trivially "never called".
+    They are regression/gating guards — once Subtask 4 is implemented they
+    must keep passing, catching a future coder who wires the selectbox
+    without the has_swarm gate (mirroring the has_music-gated Artist
+    selectbox's existing pattern).
+    """
+
+    def _make_col_mock(self) -> MagicMock:
+        col = MagicMock()
+        col.__enter__ = MagicMock(return_value=col)
+        col.__exit__ = MagicMock(return_value=False)
+        return col
+
+    def _make_pop_mock(self) -> MagicMock:
+        return MagicMock(
+            __enter__=MagicMock(return_value=MagicMock()),
+            __exit__=MagicMock(return_value=False),
+        )
+
+    def _cols_side_effect(self, *args, **kwargs):
+        n = args[0] if args else 1
+        count = len(n) if isinstance(n, (list, tuple)) else int(n)
+        return [self._make_col_mock() for _ in range(count)]
+
+    def _assert_source_selectbox_never_called(self, mock_sel: MagicMock) -> None:
+        for call in mock_sel.call_args_list:
+            label = call.args[0] if call.args else None
+            self.assertNotEqual(
+                label,
+                "Source",
+                "st.selectbox('Source', ...) must not be called when has_swarm is False",
+            )
+
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.plotly_chart")
+    @patch("streamlit.metric")
+    @patch("streamlit.caption")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    def test_source_selectbox_not_called_when_swarm_df_none(
+        self,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_cap: MagicMock,
+        mock_metric: MagicMock,
+        mock_plotly: MagicMock,
+        mock_share: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        mock_sel.return_value = "All"
+        mock_radio.return_value = "By Artist"
+        mock_cols.side_effect = self._cols_side_effect
+
+        with patch("streamlit.popover", return_value=self._make_pop_mock()):
+            with patch("streamlit.pills", return_value=["Scrobbles"]):
+                with patch("streamlit.date_input", return_value=()):
+                    with patch(
+                        "streamlit.session_state", {"df": _make_music_df(), "swarm_df": None}
+                    ):
+                        render_geo_explorer()
+
+        self._assert_source_selectbox_never_called(mock_sel)
+
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.plotly_chart")
+    @patch("streamlit.metric")
+    @patch("streamlit.caption")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    def test_source_selectbox_not_called_when_swarm_df_empty(
+        self,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_cap: MagicMock,
+        mock_metric: MagicMock,
+        mock_plotly: MagicMock,
+        mock_share: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        mock_sel.return_value = "All"
+        mock_radio.return_value = "By Artist"
+        mock_cols.side_effect = self._cols_side_effect
+
+        with patch("streamlit.popover", return_value=self._make_pop_mock()):
+            with patch("streamlit.pills", return_value=["Scrobbles"]):
+                with patch("streamlit.date_input", return_value=()):
+                    with patch(
+                        "streamlit.session_state",
+                        {"df": _make_music_df(), "swarm_df": pd.DataFrame()},
+                    ):
+                        render_geo_explorer()
+
+        self._assert_source_selectbox_never_called(mock_sel)
+
+
+class TestGeoExplorer2DMapSourceFilterWiring(unittest.TestCase):
+    """AC #1 / #2 — filter_by_source()'s return value (not the raw swarm_df)
+    must reach _render_2d_map, regardless of the By Artist / By City breakdown
+    radio selection (AC #1's mode-independence claim: the "By City" mode only
+    relabels the check-in dots, it doesn't change which rows are filtered).
+    """
+
+    def _make_col_mock(self) -> MagicMock:
+        col = MagicMock()
+        col.__enter__ = MagicMock(return_value=col)
+        col.__exit__ = MagicMock(return_value=False)
+        return col
+
+    def _make_pop_mock(self) -> MagicMock:
+        return MagicMock(
+            __enter__=MagicMock(return_value=MagicMock()),
+            __exit__=MagicMock(return_value=False),
+        )
+
+    def _cols_side_effect(self, *args, **kwargs):
+        n = args[0] if args else 1
+        count = len(n) if isinstance(n, (list, tuple)) else int(n)
+        return [self._make_col_mock() for _ in range(count)]
+
+    def _sel_side_effect_selecting(self, source_label: str):
+        def _inner(label, *a, **kw):
+            if label == "Source":
+                return source_label
+            return "All"  # Artist selectbox
+
+        return _inner
+
+    def _run(
+        self,
+        mock_filter: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_sel: MagicMock,
+        mock_cols: MagicMock,
+        mock_radio: MagicMock,
+        breakdown_mode: str,
+        selected_source: str,
+    ) -> None:
+        mock_get_opts.return_value = ["All", "Google Timeline", "Swarm"]
+        mock_filter.side_effect = _stub_filter_by_source
+        mock_sel.side_effect = self._sel_side_effect_selecting(selected_source)
+        mock_radio.return_value = breakdown_mode
+        mock_cols.side_effect = self._cols_side_effect
+
+        with patch("streamlit.popover", return_value=self._make_pop_mock()):
+            with patch("streamlit.pills", return_value=["Scrobbles", "Check-ins"]):
+                with patch("streamlit.date_input", return_value=()):
+                    with patch(
+                        "streamlit.session_state",
+                        {"df": _make_music_df(), "swarm_df": _make_mixed_source_swarm_df()},
+                    ):
+                        render_geo_explorer()
+
+    @patch("pages.geo_explorer._render_2d_map")
+    @patch("pages.geo_explorer.filter_by_source", create=True)
+    @patch("pages.geo_explorer.get_source_options", create=True)
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_swarm_selection_filters_checkin_dots_by_artist_mode(
+        self,
+        mock_cap: MagicMock,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_share: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_filter: MagicMock,
+        mock_render_2d: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        self._run(
+            mock_filter,
+            mock_get_opts,
+            mock_sel,
+            mock_cols,
+            mock_radio,
+            breakdown_mode="By Artist",
+            selected_source="Swarm",
+        )
+
+        mock_filter.assert_called_once()
+        filter_call_df, filter_call_label = mock_filter.call_args[0]
+        self.assertEqual(len(filter_call_df), 2)  # original, unfiltered swarm_df
+        self.assertEqual(filter_call_label, "Swarm")
+
+        mock_render_2d.assert_called_once()
+        passed_swarm_df = mock_render_2d.call_args[0][1]
+        self.assertEqual(len(passed_swarm_df), 1)
+        self.assertEqual(passed_swarm_df.iloc[0]["source_id"], "swarm")
+        self.assertAlmostEqual(float(passed_swarm_df.iloc[0]["lat"]), 64.13, places=2)
+        # The Google-Timeline-only coordinate must be absent from what reaches
+        # _render_2d_map's ci groupby.
+        self.assertNotIn(52.52, passed_swarm_df["lat"].tolist())
+
+    @patch("pages.geo_explorer._render_2d_map")
+    @patch("pages.geo_explorer.filter_by_source", create=True)
+    @patch("pages.geo_explorer.get_source_options", create=True)
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_swarm_selection_filters_checkin_dots_by_city_mode(
+        self,
+        mock_cap: MagicMock,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_share: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_filter: MagicMock,
+        mock_render_2d: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        self._run(
+            mock_filter,
+            mock_get_opts,
+            mock_sel,
+            mock_cols,
+            mock_radio,
+            breakdown_mode="By City",
+            selected_source="Swarm",
+        )
+
+        mock_render_2d.assert_called_once()
+        passed_swarm_df = mock_render_2d.call_args[0][1]
+        self.assertEqual(len(passed_swarm_df), 1)
+        self.assertEqual(passed_swarm_df.iloc[0]["source_id"], "swarm")
+        self.assertNotIn(52.52, passed_swarm_df["lat"].tolist())
+
+    @patch("pages.geo_explorer._render_2d_map")
+    @patch("pages.geo_explorer.filter_by_source", create=True)
+    @patch("pages.geo_explorer.get_source_options", create=True)
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_all_selection_keeps_full_checkin_dataset(
+        self,
+        mock_cap: MagicMock,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_share: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_filter: MagicMock,
+        mock_render_2d: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        self._run(
+            mock_filter,
+            mock_get_opts,
+            mock_sel,
+            mock_cols,
+            mock_radio,
+            breakdown_mode="By Artist",
+            selected_source="All",
+        )
+
+        # Wiring must exist even for the "All" passthrough case — otherwise
+        # this assertion would pass vacuously pre-implementation (the
+        # unfiltered swarm_df already has 2 rows), which is not a meaningful
+        # RED test. Asserting the call happened proves the filter is actually
+        # wired in, not merely coincidentally matching.
+        mock_filter.assert_called_once()
+        filter_call_df, filter_call_label = mock_filter.call_args[0]
+        self.assertEqual(len(filter_call_df), 2)
+        self.assertEqual(filter_call_label, "All")
+
+        mock_render_2d.assert_called_once()
+        passed_swarm_df = mock_render_2d.call_args[0][1]
+        # "All" is a passthrough — row count reaching _render_2d_map must be
+        # unchanged from the unfiltered swarm_df (AC #2).
+        self.assertEqual(len(passed_swarm_df), 2)
+
+    @patch("pages.geo_explorer._render_2d_map")
+    @patch("pages.geo_explorer.filter_by_source", create=True)
+    @patch("pages.geo_explorer.get_source_options", create=True)
+    @patch("pages.geo_explorer.render_share_button")
+    @patch("streamlit.radio")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_selectbox_populated_from_get_source_options(
+        self,
+        mock_cap: MagicMock,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_radio: MagicMock,
+        mock_share: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_filter: MagicMock,
+        mock_render_2d: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🗺 2D Map"
+        self._run(
+            mock_filter,
+            mock_get_opts,
+            mock_sel,
+            mock_cols,
+            mock_radio,
+            breakdown_mode="By Artist",
+            selected_source="All",
+        )
+
+        mock_get_opts.assert_called_once()
+        passed_df_to_get_opts = mock_get_opts.call_args[0][0]
+        self.assertEqual(len(passed_df_to_get_opts), 2)  # unfiltered swarm_df
+
+        source_calls = [c for c in mock_sel.call_args_list if c.args and c.args[0] == "Source"]
+        self.assertEqual(len(source_calls), 1)
+        self.assertEqual(source_calls[0].args[1], mock_get_opts.return_value)
+
+
+class TestGeoExplorer3DGlobeSourceFilterWiring(unittest.TestCase):
+    """AC #1 — the same filtered swarm_df must reach _render_3d_globe's
+    checkin_geo groupby, the second independent consumption point besides
+    _render_2d_map."""
+
+    def _make_col_mock(self) -> MagicMock:
+        col = MagicMock()
+        col.__enter__ = MagicMock(return_value=col)
+        col.__exit__ = MagicMock(return_value=False)
+        return col
+
+    def _make_pop_mock(self) -> MagicMock:
+        return MagicMock(
+            __enter__=MagicMock(return_value=MagicMock()),
+            __exit__=MagicMock(return_value=False),
+        )
+
+    def _cols_side_effect(self, *args, **kwargs):
+        n = args[0] if args else 1
+        count = len(n) if isinstance(n, (list, tuple)) else int(n)
+        return [self._make_col_mock() for _ in range(count)]
+
+    def _sel_side_effect_selecting(self, source_label: str):
+        def _inner(label, *a, **kw):
+            if label == "Source":
+                return source_label
+            return "All"
+
+        return _inner
+
+    @patch("pages.geo_explorer._render_3d_globe")
+    @patch("pages.geo_explorer.filter_by_source", create=True)
+    @patch("pages.geo_explorer.get_source_options", create=True)
+    @patch("streamlit.slider")
+    @patch("streamlit.selectbox")
+    @patch("streamlit.columns")
+    @patch("streamlit.segmented_control")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    def test_swarm_selection_filters_checkin_dots_in_3d_view(
+        self,
+        mock_cap: MagicMock,
+        mock_hdr: MagicMock,
+        mock_seg: MagicMock,
+        mock_cols: MagicMock,
+        mock_sel: MagicMock,
+        mock_slider: MagicMock,
+        mock_get_opts: MagicMock,
+        mock_filter: MagicMock,
+        mock_render_3d: MagicMock,
+    ) -> None:
+        mock_seg.return_value = "🌐 3D Globe"
+        mock_get_opts.return_value = ["All", "Google Timeline", "Swarm"]
+        mock_filter.side_effect = _stub_filter_by_source
+        mock_sel.side_effect = self._sel_side_effect_selecting("Swarm")
+        mock_cols.side_effect = self._cols_side_effect
+        mock_slider.return_value = 5.5
+
+        with patch("streamlit.popover", return_value=self._make_pop_mock()):
+            with patch("streamlit.pills", return_value=["Scrobbles", "Check-ins"]):
+                with patch("streamlit.date_input", return_value=()):
+                    with patch(
+                        "streamlit.session_state",
+                        {"df": _make_music_df(), "swarm_df": _make_mixed_source_swarm_df()},
+                    ):
+                        render_geo_explorer()
+
+        mock_filter.assert_called_once()
+        filter_call_df, filter_call_label = mock_filter.call_args[0]
+        self.assertEqual(len(filter_call_df), 2)
+        self.assertEqual(filter_call_label, "Swarm")
+
+        mock_render_3d.assert_called_once()
+        passed_swarm_df = mock_render_3d.call_args[0][1]
+        self.assertEqual(len(passed_swarm_df), 1)
+        self.assertEqual(passed_swarm_df.iloc[0]["source_id"], "swarm")
+        self.assertNotIn(52.52, passed_swarm_df["lat"].tolist())
+
+
+class TestCityStatsRemainMusicDfOnly(unittest.TestCase):
+    """AC #5 regression guard — Subtask 4 must not wire swarm_df into the
+    scrobble-only city-breakdown call path (_build_city_stats /
+    _render_city_breakdown / _render_atlas_city_detail).
+
+    These assertions describe today's (pre-Subtask-4) signatures and are
+    expected to keep passing unmodified; they exist to catch a future coder
+    who accidentally adds a swarm_df argument to this path, which would
+    require columns (artist/track/date_text) swarm_df doesn't have.
+    """
+
+    def test_build_city_stats_takes_single_positional_df_argument(self) -> None:
+        sig = inspect.signature(_build_city_stats)
+        self.assertEqual(list(sig.parameters.keys()), ["df"])
+
+    def test_render_city_breakdown_takes_single_music_df_argument(self) -> None:
+        from pages.geo_explorer import _render_city_breakdown
+
+        sig = inspect.signature(_render_city_breakdown)
+        self.assertEqual(list(sig.parameters.keys()), ["music_df"])
+
+    def test_render_atlas_city_detail_has_no_swarm_df_argument(self) -> None:
+        from pages.geo_explorer import _render_atlas_city_detail
+
+        sig = inspect.signature(_render_atlas_city_detail)
+        self.assertNotIn("swarm_df", sig.parameters)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ from components.theme import (
     MAP_STATE_BORDER_RGBA,
     apply_dark_theme,
 )
+from core.source_filter import filter_by_source, get_source_options
 from export_html import build_checkin_insights_html, build_places_page_html
 
 _RECORD_SCRIPT = os.path.normpath(
@@ -480,7 +481,9 @@ def render_checkin_insights() -> None:
     """Render the Places Insights page: country and city breakdown of Swarm check-ins.
 
     Reads ``st.session_state['swarm_df']``.  Shows an empty state when no
-    Foursquare/Swarm data has been loaded.
+    Foursquare/Swarm data has been loaded, and lets the user narrow the
+    displayed check-ins down to a single data source (Swarm vs. Google
+    Timeline vs. All).
     """
     swarm_df: DataFrame | None = st.session_state.get("swarm_df")
 
@@ -491,6 +494,15 @@ def render_checkin_insights() -> None:
             "No Foursquare/Swarm data loaded yet. "
             "Configure the Swarm export directory in the sidebar."
         )
+        return
+
+    selected_source = st.selectbox(
+        "Source", get_source_options(swarm_df), key="checkin_source_filter"
+    )
+    swarm_df = filter_by_source(swarm_df, selected_source)
+
+    if swarm_df is None or swarm_df.empty:
+        st.info("No check-ins match the selected source filter.")
         return
 
     generated_at = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
