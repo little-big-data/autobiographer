@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 
 import pandas as pd
@@ -21,8 +22,8 @@ from analysis_utils import (
 
 class TestAnalysisUtils(unittest.TestCase):
     def setUp(self):
-        self.test_csv = "data/test_analysis_utils.csv"
-        os.makedirs("data", exist_ok=True)
+        fd, self.test_csv = tempfile.mkstemp(prefix="test_analysis_utils_", suffix=".csv")
+        os.close(fd)
         self.df = pd.DataFrame(
             {
                 "artist": ["Artist 1", "Artist 2", "Artist 1"],
@@ -261,6 +262,32 @@ class TestAnalysisUtils(unittest.TestCase):
         self.assertIn("city", result.columns)
         self.assertIn("lat", result.columns)
         self.assertEqual(result.iloc[0]["city"], "Reykjavik")
+
+    def test_setup_uses_unique_per_invocation_csv_path(self):
+        """self.test_csv must be a unique per-invocation path, not a
+        hardcoded shared path, so parallel pytest-xdist workers running
+        different test methods of this TestCase never race on the same file
+        (handoff.md Subtask 1)."""
+        other = TestAnalysisUtils("test_load_listening_data")
+        other.setUp()
+        try:
+            self.assertNotEqual(
+                self.test_csv,
+                other.test_csv,
+                "self.test_csv must be a unique per-invocation path, not a "
+                "shared hardcoded path reused across invocations",
+            )
+            # tearing down one invocation's fixture must never remove the
+            # other invocation's still-in-use fixture file.
+            other.tearDown()
+            self.assertTrue(
+                os.path.exists(self.test_csv),
+                "tearing down a different TestAnalysisUtils invocation must "
+                "not delete this invocation's still-in-use test_csv",
+            )
+        finally:
+            if os.path.exists(other.test_csv):
+                os.remove(other.test_csv)
 
 
 class TestSwarmAnalysisCaches(unittest.TestCase):
