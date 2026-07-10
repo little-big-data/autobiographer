@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 import unittest
 from datetime import date
 from unittest.mock import patch
@@ -13,8 +14,7 @@ from record_flythrough import create_recording_assets, filter_data
 
 class TestRecordFlythrough(unittest.TestCase):
     def setUp(self):
-        self.test_dir = "data_test_fly"
-        os.makedirs(self.test_dir, exist_ok=True)
+        self.test_dir = tempfile.mkdtemp(prefix="record_flythrough_test_")
         self.test_csv = os.path.join(self.test_dir, "test_tracks.csv")
 
         self.df = pd.DataFrame(
@@ -79,6 +79,32 @@ class TestRecordFlythrough(unittest.TestCase):
 
         self.assertTrue(mock_load_swarm.called)
         self.assertTrue(mock_apply.called)
+
+    def test_setup_uses_unique_per_invocation_dir(self):
+        """self.test_dir must be a unique per-invocation path, not a
+        hardcoded shared path, so parallel pytest-xdist workers running
+        different test methods of this TestCase never race on the same
+        directory (handoff.md Subtask 1)."""
+        other = TestRecordFlythrough("test_filter_data_artist")
+        other.setUp()
+        try:
+            self.assertNotEqual(
+                self.test_dir,
+                other.test_dir,
+                "self.test_dir must be a unique per-invocation path, not a "
+                "shared hardcoded path reused across invocations",
+            )
+            # tearing down one invocation's fixtures must never remove the
+            # other invocation's still-in-use fixtures.
+            other.tearDown()
+            self.assertTrue(
+                os.path.exists(self.test_dir),
+                "tearing down a different TestRecordFlythrough invocation "
+                "must not delete this invocation's still-in-use test_dir",
+            )
+        finally:
+            if os.path.exists(other.test_dir):
+                shutil.rmtree(other.test_dir)
 
 
 class TestBuildFlythroughFilename(unittest.TestCase):

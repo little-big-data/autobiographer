@@ -58,6 +58,21 @@ pip install -e .
 
 The `localizer` CLI is registered as a script entry point after install.
 
+To run this sub-package's test suite, install the `dev` extras and run pytest from within
+`packages/localizer/`:
+
+```bash
+pip install -e "packages/localizer/[dev]"
+
+cd packages/localizer
+
+# Fast local run — parallelized across CPU cores via pytest-xdist:
+pytest -n auto
+
+# Serial run (e.g. for debugging with --pdb):
+pytest
+```
+
 ---
 
 ## Quickstart

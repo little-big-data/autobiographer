@@ -102,7 +102,7 @@ ruff format --check .
 mypy
 
 # Tests with coverage (threshold and flags are set in pyproject.toml)
-pytest
+pytest -n auto
 ```
 
 All commands must exit with code 0. If any fail, fix the reported errors and re-run the full gate from Step 1 before pushing.
@@ -137,4 +137,8 @@ pre-commit install --hook-type pre-push
 
 This installs two hook stages:
 - **pre-commit**: ruff (auto-fix + format) and mypy — fast checks on every commit.
-- **pre-push**: full CI gate (ruff check, ruff format --check, mypy, pytest) — mirrors CI exactly, blocking any push that would fail.
+- **pre-push**: ruff check, ruff format --check, mypy — fast lint/type checks, blocking any push that
+  would fail them. The full pytest suite is intentionally **not** run on every push (it was a major
+  bottleneck — the full suite takes ~10 minutes); CI's `quality` job remains the sole authoritative
+  full-suite gate, run on every PR push. Run `pytest -n auto` manually before pushing if you want a
+  local confidence check.
