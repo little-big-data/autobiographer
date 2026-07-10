@@ -51,6 +51,7 @@ def load_builtin_plugins() -> None:
     from localizer.plugins.letterboxd.loader import LetterboxdPlugin
     from localizer.plugins.rss.loader import RssPlugin
     from localizer.plugins.swarm.loader import SwarmPlugin
+    from localizer.plugins.untappd.loader import UntappdPlugin
 
     REGISTRY[LastFmPlugin.PLUGIN_ID] = LastFmPlugin
     REGISTRY[SwarmPlugin.PLUGIN_ID] = SwarmPlugin
@@ -60,3 +61,4 @@ def load_builtin_plugins() -> None:
     REGISTRY[LetterboxdPlugin.PLUGIN_ID] = LetterboxdPlugin
     REGISTRY[GoogleTimelinePlugin.PLUGIN_ID] = GoogleTimelinePlugin
     REGISTRY[FlickrPlugin.PLUGIN_ID] = FlickrPlugin
+    REGISTRY[UntappdPlugin.PLUGIN_ID] = UntappdPlugin
