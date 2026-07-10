@@ -554,6 +554,240 @@ def test_fetch_records_fetched_at_is_recent(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# OUTPUT_TABLES dual-output (issue #123)
+# ---------------------------------------------------------------------------
+
+
+def test_flickr_plugin_output_tables_includes_events() -> None:
+    """OutputTable.EVENTS must now also be in FlickrPlugin.OUTPUT_TABLES."""
+    from localizer.plugins.base import OutputTable
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    assert OutputTable.EVENTS in FlickrPlugin.OUTPUT_TABLES
+
+
+def test_flickr_plugin_output_tables_still_includes_places() -> None:
+    """OutputTable.PLACES must remain in FlickrPlugin.OUTPUT_TABLES (unchanged)."""
+    from localizer.plugins.base import OutputTable
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    assert OutputTable.PLACES in FlickrPlugin.OUTPUT_TABLES
+
+
+# ---------------------------------------------------------------------------
+# fetch_secondary_records — EVENTS output (issue #123)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_secondary_records_non_geotagged_photo_is_yielded(tmp_path: Path) -> None:
+    """A non-geotagged photo, dropped by fetch_records(geotagged_only=True), must
+    still appear via fetch_secondary_records() — the whole point of the EVENTS pipeline."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path), geotagged_only=True)
+    place_records = list(plugin.fetch_records())
+    event_records = list(plugin.fetch_secondary_records())
+
+    assert place_records == [], "Sanity check: PLACES pipeline still drops non-geotagged photos"
+    assert len(event_records) == 1, (
+        f"Expected the non-geotagged photo to appear via EVENTS, got {len(event_records)}"
+    )
+
+
+def test_fetch_secondary_records_geotagged_photo_also_yielded(tmp_path: Path) -> None:
+    """A geotagged photo must also appear via fetch_secondary_records() (EVENTS)."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=GEOTAGGED))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    event_records = list(plugin.fetch_secondary_records())
+
+    assert len(event_records) == 1
+
+
+def test_fetch_secondary_records_label_is_photo_title(tmp_path: Path) -> None:
+    """label must equal the photo's 'name' (title)."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(name="Sunset over the bay", geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 1
+    assert records[0]["label"] == "Sunset over the bay"
+
+
+def test_fetch_secondary_records_missing_title_yields_empty_label(tmp_path: Path) -> None:
+    """A photo with no 'name' key must yield label == '' (not KeyError/None)."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(name=None, geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 1
+    assert records[0]["label"] == ""
+
+
+def test_fetch_secondary_records_sublabel_is_first_album(tmp_path: Path) -> None:
+    """sublabel must equal the first album title when albums are present."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(
+        tmp_path,
+        "photo_1.json",
+        _make_photo_data(albums=["Alps 2023", "Best Of"], geo=None),
+    )
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 1
+    assert records[0]["sublabel"] == "Alps 2023"
+
+
+def test_fetch_secondary_records_no_albums_yields_empty_sublabel(tmp_path: Path) -> None:
+    """sublabel must be '' when the photo has no albums."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(albums=[], geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 1
+    assert records[0]["sublabel"] == ""
+
+
+def test_fetch_secondary_records_category_is_photo(tmp_path: Path) -> None:
+    """category must be 'photo' for every EVENTS record."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert records[0]["category"] == "photo"
+
+
+def test_fetch_secondary_records_raw_json_preserves_tags_and_photopage(tmp_path: Path) -> None:
+    """raw_json must preserve tags/albums/photopage verbatim for the EVENTS record."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    data = _make_photo_data(
+        geo=None,
+        tags=["mountains", "hiking"],
+        albums=["Alps 2023"],
+        photopage="https://www.flickr.com/photos/testuser/42/",
+    )
+    _write_photo(tmp_path, "photo_1.json", data)
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+    assert len(records) == 1
+
+    raw = _raw_json(records[0])
+    assert raw["tags"] == ["mountains", "hiking"]
+    assert raw["albums"] == ["Alps 2023"]
+    assert raw["photopage"] == "https://www.flickr.com/photos/testuser/42/"
+
+
+def test_fetch_secondary_records_source_id_is_flickr(tmp_path: Path) -> None:
+    """Each EVENTS record's source_id must equal 'flickr'."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert records[0]["source_id"] == "flickr"
+
+
+def test_fetch_secondary_records_dict_has_required_keys(tmp_path: Path) -> None:
+    """Each EVENTS record must have the required event record keys."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+    assert len(records) == 1
+
+    required_keys = {
+        "source_id",
+        "timestamp",
+        "label",
+        "sublabel",
+        "category",
+        "raw_json",
+        "fetched_at",
+    }
+    missing = required_keys - set(records[0].keys())
+    assert not missing, f"EVENTS record missing required keys: {missing}"
+
+
+def test_fetch_secondary_records_empty_export_dir_yields_empty_list(tmp_path: Path) -> None:
+    """An empty export directory must yield [] from fetch_secondary_records()."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert records == []
+
+
+def test_fetch_secondary_records_malformed_json_file_skipped(tmp_path: Path) -> None:
+    """A malformed photo_*.json file must be skipped; the valid one still yielded."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    (tmp_path / "photo_bad.json").write_text("{not valid json", encoding="utf-8")
+    _write_photo(tmp_path, "photo_good.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 1
+
+
+def test_fetch_secondary_records_since_cursor_excludes_older_photo(tmp_path: Path) -> None:
+    """A photo older than 'since' must be excluded from fetch_secondary_records()."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    older_date = "2023-01-01 00:00:00"
+    newer_date = "2023-06-15 18:30:00"
+    _write_photo(tmp_path, "photo_old.json", _make_photo_data(date_taken=older_date, geo=None))
+    _write_photo(tmp_path, "photo_new.json", _make_photo_data(date_taken=newer_date, geo=None))
+
+    older_ts = int(datetime.fromisoformat(older_date.replace(" ", "T")).timestamp())
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records(since=older_ts))
+
+    assert len(records) == 1
+
+
+def test_fetch_secondary_records_multiple_files_all_parsed(tmp_path: Path) -> None:
+    """Multiple photo_*.json files (mixed geotagged status) must all appear as events."""
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    _write_photo(tmp_path, "photo_1.json", _make_photo_data(geo=GEOTAGGED))
+    _write_photo(tmp_path, "photo_2.json", _make_photo_data(geo=None))
+    _write_photo(tmp_path, "photo_3.json", _make_photo_data(geo=None))
+
+    plugin = FlickrPlugin(export_dir=str(tmp_path))
+    records = list(plugin.fetch_secondary_records())
+
+    assert len(records) == 3
+
+
+# ---------------------------------------------------------------------------
 # Network-isolation test
 # ---------------------------------------------------------------------------
 
