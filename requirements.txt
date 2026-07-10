@@ -9,6 +9,7 @@ nbformat
 ipykernel
 pytest
 pytest-cov
+pytest-xdist
 responses
 pydeck
 geopandas
