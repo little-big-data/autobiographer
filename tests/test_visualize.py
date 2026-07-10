@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import unittest
 from unittest.mock import ANY, MagicMock, patch
 
@@ -329,8 +330,7 @@ class TestVisualize(unittest.TestCase):
     """Tests for page render functions and the dashboard entrypoint."""
 
     def setUp(self) -> None:
-        self.test_dir = "data_test"
-        os.makedirs(self.test_dir, exist_ok=True)
+        self.test_dir = tempfile.mkdtemp(prefix="visualize_test_")
         self.test_csv = os.path.join(self.test_dir, "test_user_tracks.csv")
 
         self.df = pd.DataFrame(

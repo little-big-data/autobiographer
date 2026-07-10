@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 import time
 import unittest
 
@@ -10,10 +11,8 @@ from analysis_utils import get_cache_key, get_cached_data, save_to_cache
 
 class TestCaching(unittest.TestCase):
     def setUp(self):
-        self.test_dir = "data/test_cache_dir"
-        self.cache_dir = "data/test_cache"
-        os.makedirs(self.test_dir, exist_ok=True)
-        os.makedirs(self.cache_dir, exist_ok=True)
+        self.test_dir = tempfile.mkdtemp(prefix="test_cache_dir_")
+        self.cache_dir = tempfile.mkdtemp(prefix="test_cache_")
 
         self.lastfm_file = os.path.join(self.test_dir, "test_tracks.csv")
         self.df = pd.DataFrame(
@@ -97,6 +96,45 @@ class TestCaching(unittest.TestCase):
     def test_invalid_cache_key(self):
         df = get_cached_data("nonexistent_key", cache_dir=self.cache_dir)
         self.assertIsNone(df)
+
+    def test_setup_uses_unique_per_invocation_paths(self):
+        """Fixture paths must be unique per invocation, not a hardcoded shared
+        path, so parallel pytest-xdist workers running different test methods
+        of this TestCase never race on the same directory (handoff.md
+        Subtask 1)."""
+        other = TestCaching("test_cache_key_consistency")
+        other.setUp()
+        try:
+            self.assertNotEqual(
+                self.test_dir,
+                other.test_dir,
+                "self.test_dir must be a unique per-invocation path, not a "
+                "shared hardcoded path reused across invocations",
+            )
+            self.assertNotEqual(
+                self.cache_dir,
+                other.cache_dir,
+                "self.cache_dir must be a unique per-invocation path, not a "
+                "shared hardcoded path reused across invocations",
+            )
+            # tearing down one invocation's fixtures must never remove the
+            # other invocation's still-in-use fixtures.
+            other.tearDown()
+            self.assertTrue(
+                os.path.exists(self.test_dir),
+                "tearing down a different TestCaching invocation must not "
+                "delete this invocation's still-in-use test_dir",
+            )
+            self.assertTrue(
+                os.path.exists(self.cache_dir),
+                "tearing down a different TestCaching invocation must not "
+                "delete this invocation's still-in-use cache_dir",
+            )
+        finally:
+            if os.path.exists(other.test_dir):
+                shutil.rmtree(other.test_dir)
+            if os.path.exists(other.cache_dir):
+                shutil.rmtree(other.cache_dir)
 
 
 if __name__ == "__main__":

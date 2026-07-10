@@ -1,7 +1,9 @@
 import os
+import tempfile
 import time
 import unittest
 import unittest.mock
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -65,7 +67,8 @@ class TestAutobiographer(unittest.TestCase):
                 "date": {"uts": "1610000000", "#text": "Date 1"},
             }
         ]
-        test_filename = "data/test_tracks.csv"
+        fd, test_filename = tempfile.mkstemp(prefix="test_tracks_", suffix=".csv")
+        os.close(fd)
 
         # Save to CSV
         self.visualizer.save_tracks_to_csv(tracks, filename=test_filename)
@@ -314,6 +317,55 @@ class TestRunList(unittest.TestCase):
 
         printed = " ".join(str(c) for c in mock_print.call_args_list)
         self.assertIn("✓", printed)
+
+
+class TestNoHardcodedSharedTestFixturePaths(unittest.TestCase):
+    """Regression guard for handoff.md Subtask 1: these four root-suite test
+    files must not use a hardcoded, repo-relative, *shared* filesystem path
+    as a unittest fixture. Under pytest-xdist's default "load" scheduling,
+    individual test methods (not whole classes) are distributed across
+    worker processes, so two methods of the same TestCase sharing one
+    hardcoded path can race: one worker's tearDown() can delete/overwrite a
+    fixture file/directory while another worker's test is mid-use. Every
+    fixture path must instead be unique per invocation (e.g. via
+    `tempfile`), so this test asserts the literal hardcoded strings no
+    longer appear in these files' source text at all.
+    """
+
+    # Built via concatenation, rather than as single contiguous string
+    # literals, so this test's own source text (which is itself one of the
+    # FILES_TO_CHECK below, since test_autobiographer.py has its own inline
+    # hazard) never self-matches the very literals it is searching for.
+    FORBIDDEN_LITERALS = [
+        "data" + "/test_cache",
+        "data/test_analysis_utils" + ".csv",
+        "data" + "_test_fly",
+        "data/test_tracks" + ".csv",
+    ]
+
+    FILES_TO_CHECK = [
+        "tests/test_caching.py",
+        "tests/test_analysis_utils.py",
+        "tests/test_record_flythrough.py",
+        "tests/test_autobiographer.py",
+    ]
+
+    def test_no_hardcoded_shared_fixture_path_literals(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        violations = []
+        for rel_path in self.FILES_TO_CHECK:
+            text = (repo_root / rel_path).read_text(encoding="utf-8")
+            for literal in self.FORBIDDEN_LITERALS:
+                if literal in text:
+                    violations.append(f"{rel_path}: found hardcoded literal {literal!r}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "Hardcoded shared-path test fixtures found (unsafe under "
+            "pytest-xdist parallel workers) -- replace with a "
+            "tempfile-generated unique-per-invocation path: " + "; ".join(violations),
+        )
 
 
 if __name__ == "__main__":
