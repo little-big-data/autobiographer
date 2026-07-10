@@ -178,7 +178,7 @@ def main() -> None:
             ],
             "Culture": [
                 st.Page(render_culture, title="Films & Books", icon=":material/local_library:"),
-                st.Page(render_beer, title="Beer", icon=":material/sports_bar:"),
+                st.Page(render_beer, title="Drinking History", icon=":material/sports_bar:"),
             ],
             "Sources": sources_pages,
         }
