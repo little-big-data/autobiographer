@@ -44,6 +44,7 @@ def load_builtin_plugins() -> None:
     re-registers, because @register only fires on first module import.
     """
     from localizer.plugins.feedly.loader import FeedlyPlugin
+    from localizer.plugins.flickr.loader import FlickrPlugin
     from localizer.plugins.github.loader import GitHubPlugin
     from localizer.plugins.google_timeline.loader import GoogleTimelinePlugin
     from localizer.plugins.lastfm.loader import LastFmPlugin
@@ -58,3 +59,4 @@ def load_builtin_plugins() -> None:
     REGISTRY[RssPlugin.PLUGIN_ID] = RssPlugin
     REGISTRY[LetterboxdPlugin.PLUGIN_ID] = LetterboxdPlugin
     REGISTRY[GoogleTimelinePlugin.PLUGIN_ID] = GoogleTimelinePlugin
+    REGISTRY[FlickrPlugin.PLUGIN_ID] = FlickrPlugin

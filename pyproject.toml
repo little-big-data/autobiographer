@@ -62,6 +62,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S", "B", "E501"]
+"packages/localizer/tests/*" = ["S", "B", "E501"]
 "record_flythrough.py" = ["E501"]  # long lines are embedded JS inside f-strings
 "export_html.py" = ["E501"]  # long lines are embedded JS/CSS inside f-strings
 
