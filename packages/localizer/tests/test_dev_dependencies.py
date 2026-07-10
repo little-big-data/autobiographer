@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ImportError:  # Python 3.9/3.10 — stdlib tomllib landed in 3.11.
+    import tomli as tomllib  # noqa: PLC0415
 
 # packages/localizer/pyproject.toml, relative to this test file
 # (packages/localizer/tests/test_dev_dependencies.py -> packages/localizer/pyproject.toml)

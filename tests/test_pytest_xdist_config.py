@@ -14,7 +14,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ImportError:  # Python 3.9/3.10 — stdlib tomllib landed in 3.11.
+    import tomli as tomllib  # noqa: PLC0415
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
