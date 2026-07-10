@@ -2,7 +2,7 @@
 
 Loads a user-authored JSON file that describes where the user was during
 periods not covered by Swarm check-ins — trips, recurring holidays, and
-home residency rules. This data is consumed by apply_swarm_offsets() to
+home residency rules. This data is consumed by apply_location_context() to
 assign locations and timezone offsets to Last.fm listens.
 """
 
@@ -24,7 +24,7 @@ class AssumptionsPlugin(_LegacyAutoPlugin):
     The JSON file describes where the user was during periods not recorded
     by Swarm: long trips, annually recurring holidays, and home/work
     residency rules. The sidebar passes the file path to load_assumptions()
-    so apply_swarm_offsets() can fill in locations for Last.fm listens.
+    so apply_location_context() can fill in locations for Last.fm listens.
     """
 
     PLUGIN_TYPE = "location-context"

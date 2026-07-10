@@ -29,7 +29,7 @@ Autobiographer uses localizer as its data layer, but localizer is a standalone p
 │  DISPLAY PHASE  (streamlit run visualize.py)                    │
 │                                                                 │
 │  LocalizerBroker reads DataFrames from DuckDB                   │
-│  apply_swarm_offsets() enriches Last.fm events with location    │
+│  apply_location_context() enriches Last.fm events with location │
 │    — reads default_assumptions.json at runtime (not in DuckDB)  │
 │                                                                 │
 │  Zero outbound network calls at render time                     │
@@ -38,9 +38,9 @@ Autobiographer uses localizer as its data layer, but localizer is a standalone p
 
 ### The places layer and location assumptions
 
-The `places` table stores timestamped GPS check-ins from sources like Foursquare/Swarm. These are used to infer where you were when you listened to music, watched a film, etc.
+The `places` table stores timestamped GPS check-ins from any registered where-when source — Foursquare/Swarm, Google Maps Timeline, Google Location History, etc. `apply_location_context()` unions all `source_id` values in `places` (it is not tied to any single source) when inferring where you were when you listened to music, watched a film, etc.
 
-**`default_assumptions.json` is not stored in DuckDB.** It is a runtime configuration file that describes where you were during periods *not covered* by check-ins — home residency rules, recurring holidays, long trips. The dashboard reads it from disk at render time via `LocalizerSettings.get_assumptions_path()` and passes it to `apply_swarm_offsets()`, which joins it against Last.fm events to assign locations.
+**`default_assumptions.json` is not stored in DuckDB.** It is a runtime configuration file that describes where you were during periods *not covered* by check-ins — home residency rules, recurring holidays, long trips. The dashboard reads it from disk at render time via `LocalizerSettings.get_assumptions_path()` and passes it to `apply_location_context()`, which joins it against Last.fm events to assign locations.
 
 This means:
 - Editing `default_assumptions.json` takes effect the next time you open the dashboard — no sync needed.

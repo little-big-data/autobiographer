@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from analysis_utils import apply_swarm_offsets, load_swarm_data
+from analysis_utils import apply_location_context, load_swarm_data
 
 
 class TestSwarmIntegration(unittest.TestCase):
@@ -58,7 +58,7 @@ class TestSwarmIntegration(unittest.TestCase):
         self.assertEqual(df.iloc[1]["city"], "Sydney")
         self.assertEqual(df.iloc[0]["offset"], 540)
 
-    def test_apply_swarm_offsets(self):
+    def test_apply_location_context(self):
         swarm_df = load_swarm_data(self.test_dir)
 
         # Last.fm tracks in UTC
@@ -77,7 +77,7 @@ class TestSwarmIntegration(unittest.TestCase):
         lastfm_df = pd.DataFrame(tracks)
         lastfm_df["date_text"] = pd.to_datetime(lastfm_df["date_text"])
 
-        adjusted_df = apply_swarm_offsets(lastfm_df, swarm_df, self.assumptions)
+        adjusted_df = apply_location_context(lastfm_df, swarm_df, self.assumptions)
 
         # Check first track: 13:00 UTC + 9 hours (JST) = 22:00
         self.assertEqual(adjusted_df.iloc[0]["date_text"].hour, 22)

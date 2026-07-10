@@ -215,7 +215,7 @@ def create_recording_assets(
             return None, None
 
     from analysis_utils import (
-        apply_swarm_offsets,
+        apply_location_context,
         load_assumptions,
         load_listening_data,
         load_swarm_data,
@@ -236,7 +236,7 @@ def create_recording_assets(
             else pd.DataFrame()
         )
         assumptions = load_assumptions(assumptions_path)
-        df = apply_swarm_offsets(df, swarm_df, assumptions)
+        df = apply_location_context(df, swarm_df, assumptions)
 
     df = filter_data(df, artist, start_date, end_date)
     if df.empty:

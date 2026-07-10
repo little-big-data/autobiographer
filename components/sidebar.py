@@ -33,7 +33,7 @@ When ``~/.localizer/store.duckdb`` (or ``LocalizerStore.default_path()``) exists
 ``render_sidebar()`` loads data via ``LocalizerBroker`` instead of the legacy
 CSV/JSON file paths: it fetches raw events/places frames, adapts them into the
 legacy column shapes via ``core.localizer_frames``, and runs the same
-``apply_swarm_offsets()`` used by the legacy path. ``_current_config`` is still
+``apply_location_context()`` used by the legacy path. ``_current_config`` is still
 written as a 4-tuple (``("", "", assumptions_path, "")``) so index-based readers
 elsewhere never see a shape change; the richer reload identity lives in
 ``_loaded_store_identity`` instead. The legacy file-hash cache
@@ -54,7 +54,7 @@ import pandas as pd
 import streamlit as st
 
 from analysis_utils import (
-    apply_swarm_offsets,
+    apply_location_context,
     get_cache_key,
     get_cached_data,
     load_assumptions,
@@ -131,7 +131,7 @@ def _load_data_from_broker(assumptions_path: str) -> None:
 
     Fetches raw events/places frames from ``LocalizerBroker``, adapts them into
     the legacy ``lastfm_df``/``swarm_df`` shapes via ``core.localizer_frames``,
-    and runs the existing ``apply_swarm_offsets()`` logic on top — mirroring the
+    and runs the existing ``apply_location_context()`` logic on top — mirroring the
     legacy path's computation but sourced from the localizer DuckDB store
     instead of flat CSV/JSON files. The file-hash cache is intentionally not
     used here (see the module docstring's "Broker mode" section); instead
@@ -169,7 +169,7 @@ def _load_data_from_broker(assumptions_path: str) -> None:
             swarm_df = places_to_swarm_frame(broker.get_places_frame())
 
             st.write("Applying timezone offsets…")
-            merged_df = apply_swarm_offsets(lastfm_df, swarm_df, assumptions)
+            merged_df = apply_location_context(lastfm_df, swarm_df, assumptions)
 
             status.update(label="Data ready.", state="complete", expanded=False)
 
@@ -226,7 +226,7 @@ def _load_data_with_progress(
     """Load all data sources with a visible progress widget; store in session state.
 
     Reads the Last.fm CSV, optionally reads Swarm JSONs and a Google Timeline
-    export, checks the file cache, and runs ``apply_swarm_offsets`` on a cache
+    export, checks the file cache, and runs ``apply_location_context`` on a cache
     miss.  Swarm and Timeline location records are concatenated into a single
     ``swarm_df`` (sorted by timestamp) so every geo view and the offset join
     consume them uniformly.  Results are stored in ``st.session_state`` keys
@@ -271,7 +271,7 @@ def _load_data_with_progress(
                 if not timeline_df.empty:
                     timeline_df["source_id"] = "google_timeline"
                     swarm_df = pd.concat([swarm_df, timeline_df], ignore_index=True)
-                    # Re-sort: apply_swarm_offsets relies on ascending timestamps.
+                    # Re-sort: apply_location_context relies on ascending timestamps.
                     swarm_df = swarm_df.sort_values("timestamp").reset_index(drop=True)
 
             cache_key = get_cache_key(file_path, swarm_dir, assumptions_path, timeline_path)
@@ -284,7 +284,7 @@ def _load_data_with_progress(
             else:
                 st.session_state["_cache_status"] = "miss"
                 st.write("Applying timezone offsets — first-time setup, may take a minute…")
-                merged_df = apply_swarm_offsets(raw_df, swarm_df, assumptions)
+                merged_df = apply_location_context(raw_df, swarm_df, assumptions)
                 save_to_cache(merged_df, cache_key)
 
             status.update(label="Data ready.", state="complete", expanded=False)
