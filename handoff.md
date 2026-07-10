@@ -1,7 +1,10 @@
 # Handoff
 
 ## Plan Status
-status: IN_PROGRESS
+status: COMPLETE
+
+PR #125 opened: https://github.com/little-big-data/autobiographer/pull/125 (all 4 subtasks
+APPROVED, full-suite integration gate green — 912 passed root suite, 215 passed localizer suite).
 
 ## Task Overview
 
