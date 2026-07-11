@@ -3,7 +3,7 @@
 `LocalizerBroker.get_events_frame()` / `get_places_frame()` (see core/broker.py) return
 generic columns (`timestamp, label, sublabel, category, source_id` and `timestamp, lat,
 lng, place_name, place_type, source_id` respectively). The rest of the app —
-`apply_swarm_offsets()`, `pages/geo_explorer.py`, `pages/places.py` — expects the legacy
+`apply_location_context()`, `pages/geo_explorer.py`, `pages/places.py` — expects the legacy
 Last.fm/Swarm column shapes instead. These two functions bridge that gap.
 
 This module is intentionally Streamlit- and DuckDB-free: it is pure DataFrame-in/
@@ -64,7 +64,7 @@ def places_to_swarm_frame(places_df: pd.DataFrame) -> pd.DataFrame:
     Returns:
         DataFrame with columns `timestamp, offset, city, state, country, venue,
         venue_category, lat, lng, event_category, shout, source_id`, sorted ascending
-        by `timestamp` (required by `apply_swarm_offsets`'s binary search over
+        by `timestamp` (required by `apply_location_context`'s binary search over
         `swarm_df["timestamp"]`). `place_name` is copied into both `city` and `venue`;
         `place_type` is renamed to `venue_category`. `state`, `country`,
         `event_category`, `shout` default to `""` and `offset` defaults to `0`, since

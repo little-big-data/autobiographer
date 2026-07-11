@@ -141,6 +141,34 @@ def test_query_events_filters_by_source_id(tmp_path):
     assert (df["source_id"] == "lastfm").all()
 
 
+def test_query_events_default_omits_raw_json(tmp_path):
+    """query_events() without include_raw_json must not add a raw_json column."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(_make_events(1))
+        df = store.query_events()
+
+    assert "raw_json" not in df.columns
+
+
+def test_query_events_include_raw_json_adds_column(tmp_path):
+    """query_events(include_raw_json=True) must add a raw_json column with the stored value."""
+    import json
+
+    db_path = tmp_path / "store.duckdb"
+    records = _make_events(1)
+    records[0]["raw_json"] = json.dumps({"tags": ["a", "b"], "photopage": "https://example.com/1"})
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(records)
+        df = store.query_events(include_raw_json=True)
+
+    assert "raw_json" in df.columns
+    assert len(df) == 1
+    parsed = json.loads(df.iloc[0]["raw_json"])
+    assert parsed["tags"] == ["a", "b"]
+    assert parsed["photopage"] == "https://example.com/1"
+
+
 def test_query_events_filters_by_since(tmp_path):
     """Upsert 3 events at timestamps 1000, 2000, 3000; since=1500 returns 2 rows."""
     db_path = tmp_path / "store.duckdb"
@@ -186,8 +214,8 @@ def test_query_events_default_excludes_raw_json_column(tmp_path):
     assert "raw_json" not in df.columns
 
 
-def test_query_events_include_raw_json_adds_column(tmp_path):
-    """include_raw_json=True must add a raw_json column alongside the usual ones."""
+def test_query_events_include_raw_json_preserves_standard_columns(tmp_path):
+    """include_raw_json=True must add raw_json without dropping the usual columns."""
     db_path = tmp_path / "store.duckdb"
     records = _make_events(1)
     records[0]["raw_json"] = '{"rating": 4.5, "venue_lat": 40.7128}'

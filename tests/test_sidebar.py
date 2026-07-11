@@ -46,7 +46,7 @@ class TestLoadDataCombination(unittest.TestCase):
             patch.object(sidebar, "load_google_timeline", return_value=self.timeline_df),
             patch.object(sidebar, "get_cache_key", return_value="k"),
             patch.object(sidebar, "get_cached_data", return_value=None),
-            patch.object(sidebar, "apply_swarm_offsets", return_value=self.raw_df),
+            patch.object(sidebar, "apply_location_context", return_value=self.raw_df),
             patch.object(sidebar, "save_to_cache"),
         ):
             sidebar._load_data_with_progress(

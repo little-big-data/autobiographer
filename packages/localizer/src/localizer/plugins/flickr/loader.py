@@ -52,7 +52,7 @@ class FlickrPlugin(SourcePlugin):
     PLUGIN_ID = "flickr"
     DISPLAY_NAME = "Flickr Photos"
     FETCH_MODE = FetchMode.MANUAL
-    OUTPUT_TABLES = [OutputTable.PLACES]
+    OUTPUT_TABLES = [OutputTable.PLACES, OutputTable.EVENTS]
     ICON = ":material/photo_camera:"
 
     def __init__(
@@ -115,24 +115,21 @@ class FlickrPlugin(SourcePlugin):
             "   folder containing the 'photo_*.json' files.\n"
         )
 
-    def fetch_records(
-        self,
-        since: int | None = None,
-        progress_cb: Any | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        """Yield normalized place dicts from Flickr JSON export files.
+    def _iter_photo_records(self, since: int | None) -> Iterator[tuple[dict[str, Any], int, int]]:
+        """Glob, parse, and timestamp every ``photo_*.json`` export file once.
 
-        Reads all ``photo_*.json`` files in ``export_dir`` and yields one
-        record per photo. Missing or non-existent directories yield nothing
-        gracefully; a malformed file is skipped without aborting the rest.
+        Shared by :meth:`fetch_records` (PLACES output) and
+        :meth:`fetch_secondary_records` (EVENTS output) so the file-reading,
+        malformed-file skipping, and ``date_taken`` parsing logic lives in
+        exactly one place.
 
         Args:
-            since: Optional Unix timestamp; yield only photos newer than this.
-            progress_cb: Optional progress callback (unused for manual plugins).
+            since: Optional Unix timestamp; only photos newer than this are
+                yielded.
 
         Yields:
-            Dicts with keys: source_id, timestamp, lat, lng, place_name,
-            place_type, raw_json, fetched_at.
+            Tuples of ``(data, timestamp, fetched_at)`` for every valid,
+            since-filtered photo — geotagged or not.
         """
         if not self._export_dir:
             return
@@ -165,6 +162,30 @@ class FlickrPlugin(SourcePlugin):
             if since is not None and timestamp <= since:
                 continue
 
+            yield data, timestamp, fetched_at
+
+    def fetch_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield normalized place dicts from Flickr JSON export files.
+
+        Reads all ``photo_*.json`` files in ``export_dir`` and yields one
+        record per geotagged photo (or every photo, with NaN lat/lng, when
+        ``geotagged_only`` is False). Missing or non-existent directories
+        yield nothing gracefully; a malformed file is skipped without
+        aborting the rest.
+
+        Args:
+            since: Optional Unix timestamp; yield only photos newer than this.
+            progress_cb: Optional progress callback (unused for manual plugins).
+
+        Yields:
+            Dicts with keys: source_id, timestamp, lat, lng, place_name,
+            place_type, raw_json, fetched_at.
+        """
+        for data, timestamp, fetched_at in self._iter_photo_records(since):
             geo = data.get("geo")
             geotagged = False
             lat = float("nan")
@@ -187,6 +208,44 @@ class FlickrPlugin(SourcePlugin):
                 "lng": lng,
                 "place_name": data.get("name") or "",
                 "place_type": "photo",
+                "raw_json": data,
+                "fetched_at": fetched_at,
+            }
+
+    def fetch_secondary_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield every photo as a timeline event, geotagged or not.
+
+        A photograph is fundamentally an event too — a moment in time with a
+        shareable URL, independent of whether it happened to carry GPS
+        coordinates. Unlike :meth:`fetch_records`, this is never filtered by
+        ``geotagged_only``: every photo in the export directory becomes one
+        event record, so photos dropped from the PLACES pipeline are still
+        visible via the EVENTS pipeline (e.g. the Photograph History page).
+
+        Args:
+            since: Optional Unix timestamp; yield only photos newer than this.
+            progress_cb: Optional progress callback (unused for manual plugins).
+
+        Yields:
+            Dicts with keys: source_id, timestamp, label, sublabel, category,
+            raw_json, fetched_at. ``label`` is the photo title, ``sublabel``
+            is its first album (if any). ``raw_json`` preserves the full
+            export record, including ``tags``, ``albums``, and ``photopage``.
+        """
+        for data, timestamp, fetched_at in self._iter_photo_records(since):
+            albums = data.get("albums")
+            sublabel = albums[0] if isinstance(albums, list) and albums else ""
+
+            yield {
+                "source_id": "flickr",
+                "timestamp": timestamp,
+                "label": data.get("name") or "",
+                "sublabel": sublabel,
+                "category": "photo",
                 "raw_json": data,
                 "fetched_at": fetched_at,
             }

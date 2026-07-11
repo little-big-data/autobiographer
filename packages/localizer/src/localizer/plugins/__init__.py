@@ -46,6 +46,7 @@ def load_builtin_plugins() -> None:
     from localizer.plugins.feedly.loader import FeedlyPlugin
     from localizer.plugins.flickr.loader import FlickrPlugin
     from localizer.plugins.github.loader import GitHubPlugin
+    from localizer.plugins.google_location.loader import GoogleLocationPlugin
     from localizer.plugins.google_timeline.loader import GoogleTimelinePlugin
     from localizer.plugins.lastfm.loader import LastFmPlugin
     from localizer.plugins.letterboxd.loader import LetterboxdPlugin
@@ -60,5 +61,6 @@ def load_builtin_plugins() -> None:
     REGISTRY[RssPlugin.PLUGIN_ID] = RssPlugin
     REGISTRY[LetterboxdPlugin.PLUGIN_ID] = LetterboxdPlugin
     REGISTRY[GoogleTimelinePlugin.PLUGIN_ID] = GoogleTimelinePlugin
+    REGISTRY[GoogleLocationPlugin.PLUGIN_ID] = GoogleLocationPlugin
     REGISTRY[FlickrPlugin.PLUGIN_ID] = FlickrPlugin
     REGISTRY[UntappdPlugin.PLUGIN_ID] = UntappdPlugin
