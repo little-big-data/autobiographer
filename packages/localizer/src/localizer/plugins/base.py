@@ -84,6 +84,32 @@ class SourcePlugin(ABC):
     # Optional (non-abstract) stubs — override in concrete plugins
     # ------------------------------------------------------------------
 
+    def fetch_secondary_records(
+        self,
+        since: int | None = None,
+        progress_cb: Any | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield records for a plugin's *second* ``OUTPUT_TABLES`` entry.
+
+        Most plugins declare exactly one entry in ``OUTPUT_TABLES`` and never
+        need this — ``fetch_records()`` alone is their whole output. A
+        dual-output plugin (e.g. ``FlickrPlugin``, which emits both
+        ``PLACES`` and ``EVENTS`` from a single import: geotagged photos as
+        places, every photo as a timeline event) overrides this to yield the
+        second output table's records independently of ``fetch_records()``'s
+        primary stream, so the two shapes never have to be interleaved into
+        one generator.
+
+        Args:
+            since: Optional Unix timestamp; yield only records newer than this.
+            progress_cb: Optional callback invoked with ``(current, total)``
+                for progress reporting.
+
+        Returns:
+            Empty iterator by default.
+        """
+        return iter([])
+
     def get_playwright_script(self) -> str | None:
         """Return a Playwright script string for PLAYWRIGHT-mode plugins.
 
