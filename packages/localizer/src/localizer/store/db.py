@@ -263,15 +263,24 @@ class LocalizerStore:
         self,
         source_id: str | None = None,
         since: int | None = None,
+        include_raw_json: bool = False,
     ) -> pd.DataFrame:
         """Query events, returning the backwards-compat what-when schema.
 
         Args:
             source_id: Filter to this source only; None returns all sources.
             since: Return only rows with timestamp >= since; None returns all.
+            include_raw_json: When True, also select the ``raw_json`` column.
+                Some plugins (e.g. Untappd, Flickr) stash fields with no
+                dedicated events column (rating, venue lat/lng, tags,
+                photopage) inside raw_json; callers that need those must opt
+                in here rather than via LocalizerBroker.get_events_frame(),
+                which intentionally keeps the generic lastfm-shaped column
+                set stable for the broader merge pipeline.
 
         Returns:
-            DataFrame with columns [timestamp, label, sublabel, category, source_id].
+            DataFrame with columns [timestamp, label, sublabel, category,
+            source_id], plus [raw_json] when include_raw_json is True.
         """
         assert self._conn is not None
         clauses: list[str] = []
@@ -284,7 +293,10 @@ class LocalizerStore:
             params.append(since)
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT timestamp, label, sublabel, category, source_id FROM events{where}"  # noqa: S608
+        columns = "timestamp, label, sublabel, category, source_id"
+        if include_raw_json:
+            columns += ", raw_json"
+        sql = f"SELECT {columns} FROM events{where}"  # noqa: S608
         return self._conn.execute(sql, params).df()
 
     def query_places(

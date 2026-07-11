@@ -448,3 +448,130 @@ def test_fetch_dry_run_does_not_write(tmp_db: Path) -> None:
             f"--dry-run must not write events; store has rows after fetch --dry-run. "
             f"CLI output: {result.output}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 14. Dual-output plugin (FlickrPlugin) routes to both PLACES and EVENTS
+# ---------------------------------------------------------------------------
+
+
+def test_sync_writes_dual_output_plugin_to_both_tables(tmp_db: Path) -> None:
+    """A plugin with OUTPUT_TABLES=[PLACES, EVENTS] (FlickrPlugin) must write its
+    primary fetch_records() stream to places AND its fetch_secondary_records()
+    stream to events — not collapse both into one table."""
+    fake_place = {
+        "source_id": "flickr",
+        "timestamp": 1_800_000,
+        "lat": 51.5074,
+        "lng": -0.1278,
+        "place_name": "Geotagged Photo",
+        "place_type": "photo",
+        "raw_json": None,
+        "fetched_at": int(time.time()),
+    }
+    fake_events = [
+        {
+            "source_id": "flickr",
+            "timestamp": 1_800_000 + i,
+            "label": f"Photo {i}",
+            "sublabel": "Album",
+            "category": "photo",
+            "raw_json": None,
+            "fetched_at": int(time.time()),
+        }
+        for i in range(2)
+    ]
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db)}
+
+    # Scope the registry to just FlickrPlugin so `sync` never touches the
+    # real (network-calling) API plugins — this test only cares about
+    # dual-output dispatch, not the other plugins' fetch behavior.
+    from localizer.plugins.flickr.loader import FlickrPlugin
+
+    def _fake_load_builtin_plugins() -> None:
+        from localizer.plugins import REGISTRY  # noqa: PLC0415
+
+        REGISTRY.clear()
+        REGISTRY["flickr"] = FlickrPlugin
+
+    with (
+        patch(
+            "localizer.plugins.flickr.loader.FlickrPlugin.fetch_records",
+            return_value=iter([fake_place]),
+        ),
+        patch(
+            "localizer.plugins.flickr.loader.FlickrPlugin.fetch_secondary_records",
+            return_value=iter(fake_events),
+        ),
+        patch("localizer.plugins.load_builtin_plugins", _fake_load_builtin_plugins),
+    ):
+        result = runner.invoke(cli, ["sync"], env=env)
+
+    assert result.exit_code == 0, result.output
+
+    from localizer.store.db import LocalizerStore
+
+    with LocalizerStore(tmp_db) as store:
+        places_df = store.query_places(source_id="flickr")
+        events_df = store.query_events(source_id="flickr")
+
+    assert len(places_df) == 1, (
+        f"Expected 1 place row from FlickrPlugin's primary stream, got {len(places_df)}. "
+        f"CLI output: {result.output}"
+    )
+    assert len(events_df) == 2, (
+        f"Expected 2 event rows from FlickrPlugin's secondary stream, got {len(events_df)}. "
+        f"CLI output: {result.output}"
+    )
+
+
+def test_fetch_writes_dual_output_plugin_to_both_tables(tmp_db: Path) -> None:
+    """localizer fetch flickr must also route primary/secondary streams to
+    places/events respectively (same guarantee as sync, single-source path)."""
+    fake_place = {
+        "source_id": "flickr",
+        "timestamp": 1_900_000,
+        "lat": 40.0,
+        "lng": -74.0,
+        "place_name": "Geotagged Photo 2",
+        "place_type": "photo",
+        "raw_json": None,
+        "fetched_at": int(time.time()),
+    }
+    fake_event = {
+        "source_id": "flickr",
+        "timestamp": 1_900_001,
+        "label": "Photo X",
+        "sublabel": "",
+        "category": "photo",
+        "raw_json": None,
+        "fetched_at": int(time.time()),
+    }
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db)}
+
+    with (
+        patch(
+            "localizer.plugins.flickr.loader.FlickrPlugin.fetch_records",
+            return_value=iter([fake_place]),
+        ),
+        patch(
+            "localizer.plugins.flickr.loader.FlickrPlugin.fetch_secondary_records",
+            return_value=iter([fake_event]),
+        ),
+    ):
+        result = runner.invoke(cli, ["fetch", "flickr"], env=env)
+
+    assert result.exit_code == 0, result.output
+
+    from localizer.store.db import LocalizerStore
+
+    with LocalizerStore(tmp_db) as store:
+        places_df = store.query_places(source_id="flickr")
+        events_df = store.query_events(source_id="flickr")
+
+    assert len(places_df) == 1
+    assert len(events_df) == 1

@@ -32,6 +32,7 @@ from pages.life_in_chapters import render_life_in_chapters
 from pages.listening_lifestyle import render_listening_lifestyle
 from pages.music import render_music, render_top_charts  # noqa: F401
 from pages.overview import render_overview  # noqa: F401
+from pages.photograph_history import render_photograph_history
 from pages.places import render_checkin_insights  # noqa: F401
 from pages.taste_drift import render_taste_drift
 from pages.venue_patterns import render_venue_patterns
@@ -178,7 +179,12 @@ def main() -> None:
             ],
             "Culture": [
                 st.Page(render_culture, title="Films & Books", icon=":material/local_library:"),
-                st.Page(render_beer, title="Beer", icon=":material/sports_bar:"),
+                st.Page(render_beer, title="Drinking History", icon=":material/sports_bar:"),
+                st.Page(
+                    render_photograph_history,
+                    title="Photograph History",
+                    icon=":material/photo_camera:",
+                ),
             ],
             "Sources": sources_pages,
         }

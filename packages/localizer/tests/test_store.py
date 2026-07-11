@@ -141,6 +141,34 @@ def test_query_events_filters_by_source_id(tmp_path):
     assert (df["source_id"] == "lastfm").all()
 
 
+def test_query_events_default_omits_raw_json(tmp_path):
+    """query_events() without include_raw_json must not add a raw_json column."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(_make_events(1))
+        df = store.query_events()
+
+    assert "raw_json" not in df.columns
+
+
+def test_query_events_include_raw_json_adds_column(tmp_path):
+    """query_events(include_raw_json=True) must add a raw_json column with the stored value."""
+    import json
+
+    db_path = tmp_path / "store.duckdb"
+    records = _make_events(1)
+    records[0]["raw_json"] = json.dumps({"tags": ["a", "b"], "photopage": "https://example.com/1"})
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(records)
+        df = store.query_events(include_raw_json=True)
+
+    assert "raw_json" in df.columns
+    assert len(df) == 1
+    parsed = json.loads(df.iloc[0]["raw_json"])
+    assert parsed["tags"] == ["a", "b"]
+    assert parsed["photopage"] == "https://example.com/1"
+
+
 def test_query_events_filters_by_since(tmp_path):
     """Upsert 3 events at timestamps 1000, 2000, 3000; since=1500 returns 2 rows."""
     db_path = tmp_path / "store.duckdb"
@@ -162,6 +190,72 @@ def test_query_events_filters_by_since(tmp_path):
 
     assert len(df) == 2, f"Expected 2 rows with timestamp >= 1500, got {len(df)}"
     assert (df["timestamp"] >= 1500).all()
+
+
+# ---------------------------------------------------------------------------
+# 1b. query_events(include_raw_json=True) — issue #124, Drinking History view.
+#
+# pages/beer.py needs rating_score/venue_name/venue_lat/venue_lng, which the
+# UntappdPlugin only ever writes into raw_json (events has no lat/lng columns).
+# LocalizerBroker.get_events_frame() intentionally never exposes raw_json (it
+# feeds the generic lastfm-shaped merge), so this opt-in flag is the only way
+# to get raw_json back out of the events table without changing that default
+# shape or touching core/broker.py.
+# ---------------------------------------------------------------------------
+
+
+def test_query_events_default_excludes_raw_json_column(tmp_path):
+    """By default (include_raw_json unset), raw_json must not be in the result columns."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(_make_events(2))
+        df = store.query_events()
+
+    assert "raw_json" not in df.columns
+
+
+def test_query_events_include_raw_json_preserves_standard_columns(tmp_path):
+    """include_raw_json=True must add raw_json without dropping the usual columns."""
+    db_path = tmp_path / "store.duckdb"
+    records = _make_events(1)
+    records[0]["raw_json"] = '{"rating": 4.5, "venue_lat": 40.7128}'
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(records)
+        df = store.query_events(include_raw_json=True)
+
+    assert "raw_json" in df.columns
+    expected_cols = {"timestamp", "label", "sublabel", "category", "source_id", "raw_json"}
+    assert expected_cols.issubset(set(df.columns))
+
+
+def test_query_events_include_raw_json_round_trips_content(tmp_path):
+    """The raw_json column returned must contain the exact JSON that was upserted."""
+    import json
+
+    db_path = tmp_path / "store.duckdb"
+    records = _make_events(1)
+    records[0]["raw_json"] = json.dumps({"rating": 4.5, "venue_name": "The Tasting Room"})
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(records)
+        df = store.query_events(include_raw_json=True)
+
+    parsed = json.loads(df.iloc[0]["raw_json"])
+    assert parsed["rating"] == 4.5
+    assert parsed["venue_name"] == "The Tasting Room"
+
+
+def test_query_events_include_raw_json_still_filters_by_source_id(tmp_path):
+    """include_raw_json must not interfere with the existing source_id filter."""
+    db_path = tmp_path / "store.duckdb"
+    lastfm_events = _make_events(2, source_id="lastfm")
+    untappd_events = _make_events(3, source_id="untappd")
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(lastfm_events + untappd_events)
+        df = store.query_events(source_id="untappd", include_raw_json=True)
+
+    assert len(df) == 3
+    assert (df["source_id"] == "untappd").all()
+    assert "raw_json" in df.columns
 
 
 # ---------------------------------------------------------------------------
