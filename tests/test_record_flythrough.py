@@ -55,7 +55,7 @@ class TestRecordFlythrough(unittest.TestCase):
         self.assertTrue(len(keyframes) >= 2)
 
     @patch("analysis_utils.load_swarm_data")
-    @patch("analysis_utils.apply_swarm_offsets")
+    @patch("analysis_utils.apply_location_context")
     @patch("os.path.exists")
     def test_create_recording_assets_geocoding_trigger(
         self, mock_exists, mock_apply, mock_load_swarm

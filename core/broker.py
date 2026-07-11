@@ -3,7 +3,7 @@
 The DataBroker is the central data coordinator. It holds loaded DataFrames
 from each plugin, tracks which source types are available, and provides a
 merged DataFrame that combines what-when and where-when sources via temporal
-join (powered by apply_swarm_offsets for the Swarm/Last.fm case).
+join (powered by apply_location_context for the where-when/Last.fm case).
 
 Typical usage::
 
@@ -49,6 +49,10 @@ class DataBroker:
         )
         self._sources: dict[str, pd.DataFrame] = {}
         self._available_types: list[str] = []
+        # Tracks PLUGIN_TYPE per loaded source_id so get_merged_frame() can union
+        # *every* where-when source (Swarm, Google Timeline, etc.) rather than
+        # hardcoding a single plugin id (Issue #110).
+        self._plugin_types: dict[str, str] = {}
 
     @property
     def available_types(self) -> list[str]:
@@ -71,6 +75,7 @@ class DataBroker:
         """
         df = plugin.load(config)
         self._sources[plugin.PLUGIN_ID] = df
+        self._plugin_types[plugin.PLUGIN_ID] = plugin.PLUGIN_TYPE
         if plugin.PLUGIN_TYPE not in self._available_types:
             self._available_types.append(plugin.PLUGIN_TYPE)
         return df
@@ -97,16 +102,20 @@ class DataBroker:
     def get_merged_frame(self, assumptions: dict[str, Any] | None = None) -> pd.DataFrame:
         """Return a merged DataFrame combining what-when and where-when sources.
 
-        If both a what-when source (Last.fm) and a where-when source (Swarm)
-        are loaded, applies temporal merging via apply_swarm_offsets() to
-        annotate what-when records with location and timezone data.
+        If both a what-when source (Last.fm) and at least one where-when
+        source (Swarm, Google Timeline, or any other loaded plugin whose
+        ``PLUGIN_TYPE`` is ``"where-when"``) are loaded, applies temporal
+        merging via apply_location_context() to annotate what-when records
+        with location and timezone data. All loaded where-when sources are
+        unioned (concatenated) before the join, so enrichment is not tied to
+        any single source_id.
 
         If only a what-when source is loaded, returns it unmodified.
         If no what-when source is loaded, returns an empty DataFrame.
 
         Args:
             assumptions: Location assumptions dict from load_assumptions().
-                         Required for the Swarm temporal join; pass None to
+                         Required for the location temporal join; pass None to
                          skip location enrichment.
 
         Returns:
@@ -118,14 +127,31 @@ class DataBroker:
         if lastfm_df.empty:
             return lastfm_df
 
-        swarm_df = self._sources.get("swarm", pd.DataFrame())
+        where_when_frames = []
+        for source_id, plugin_type in self._plugin_types.items():
+            if plugin_type != "where-when":
+                continue
+            source_df = self._sources.get(source_id, pd.DataFrame())
+            if not source_df.empty:
+                where_when_frames.append(source_df)
 
-        if swarm_df.empty or assumptions is None:
+        if not where_when_frames or assumptions is None:
             return lastfm_df
 
-        from analysis_utils import apply_swarm_offsets
+        if len(where_when_frames) > 1:
+            # apply_location_context() binary-searches swarm_df["timestamp"], so a
+            # union of multiple sources must be re-sorted ascending.
+            swarm_df = (
+                pd.concat(where_when_frames, ignore_index=True)
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+        else:
+            swarm_df = where_when_frames[0]
 
-        return apply_swarm_offsets(lastfm_df, swarm_df, assumptions)
+        from analysis_utils import apply_location_context
+
+        return apply_location_context(lastfm_df, swarm_df, assumptions)
 
     def is_type_available(self, plugin_type: str) -> bool:
         """Check whether any loaded source provides the given plugin type.

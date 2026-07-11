@@ -72,7 +72,7 @@ US_STATES = [
 
 
 def _make_df() -> pd.DataFrame:
-    """Return a minimal DataFrame with the columns produced by apply_swarm_offsets."""
+    """Return a minimal DataFrame with the columns produced by apply_location_context."""
     return pd.DataFrame(
         {
             "artist": ["Artist A", "Artist A", "Artist B", "Artist C", "Artist A"],

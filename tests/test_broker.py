@@ -140,7 +140,7 @@ class TestDataBrokerGetMergedFrame(unittest.TestCase):
         result = broker.get_merged_frame(assumptions=None)
         pd.testing.assert_frame_equal(result, lastfm_df)
 
-    def test_calls_apply_swarm_offsets_when_both_sources_loaded(self):
+    def test_calls_apply_location_context_when_both_sources_loaded(self):
         broker = DataBroker()
         lastfm_plugin = LastFmPlugin()
         swarm_plugin = SwarmPlugin()
@@ -155,11 +155,58 @@ class TestDataBrokerGetMergedFrame(unittest.TestCase):
         with patch.object(swarm_plugin, "load", return_value=swarm_df):
             broker.load(swarm_plugin, {"swarm_dir": "fake/"})
 
-        with patch("analysis_utils.apply_swarm_offsets", return_value=merged_df) as mock_merge:
+        with patch("analysis_utils.apply_location_context", return_value=merged_df) as mock_merge:
             result = broker.get_merged_frame(assumptions=assumptions)
 
         mock_merge.assert_called_once()
         self.assertIn("city", result.columns)
+
+    def test_unions_all_where_when_sources_when_multiple_loaded(self):
+        """get_merged_frame() must union every loaded where-when source (Issue #110).
+
+        Previously this hardcoded ``self._sources.get("swarm")``, silently
+        dropping any other where-when plugin (e.g. Google Timeline) loaded
+        alongside Swarm. It must now concatenate every source whose
+        PLUGIN_TYPE is "where-when" before the temporal join.
+        """
+        from plugins.sources.google_timeline.loader import GoogleTimelinePlugin
+
+        broker = DataBroker()
+        lastfm_plugin = LastFmPlugin()
+        swarm_plugin = SwarmPlugin()
+        timeline_plugin = GoogleTimelinePlugin()
+
+        lastfm_df = _make_lastfm_df()
+        swarm_df = _make_swarm_df()
+        timeline_df = pd.DataFrame(
+            {
+                "timestamp": [1620000000],
+                "lat": [51.5],
+                "lng": [-0.12],
+                "place_name": ["London"],
+                "place_type": ["visit"],
+                "source_id": ["google_timeline"],
+            }
+        )
+        assumptions = {"defaults": {}, "holidays": [], "trips": [], "residency": []}
+
+        with patch.object(lastfm_plugin, "load", return_value=lastfm_df):
+            broker.load(lastfm_plugin, {"data_path": "fake.csv"})
+        with patch.object(swarm_plugin, "load", return_value=swarm_df):
+            broker.load(swarm_plugin, {"swarm_dir": "fake/"})
+        with patch.object(timeline_plugin, "load", return_value=timeline_df):
+            broker.load(timeline_plugin, {"timeline_path": "fake.json"})
+
+        with patch("analysis_utils.apply_location_context", return_value=lastfm_df) as mock_merge:
+            broker.get_merged_frame(assumptions=assumptions)
+
+        mock_merge.assert_called_once()
+        combined_swarm_df = mock_merge.call_args[0][1]
+        self.assertEqual(
+            set(combined_swarm_df["source_id"]),
+            {"swarm", "google_timeline"},
+            "Expected get_merged_frame() to union all where-when sources' source_ids",
+        )
 
 
 class TestDataBrokerIsTypeAvailable(unittest.TestCase):
