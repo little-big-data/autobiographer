@@ -1,8 +1,9 @@
-"""Overview page — hero card."""
+"""Overview page — hero card and Time Machine ("this day in history") card."""
 
 from __future__ import annotations
 
 import datetime
+import random
 from datetime import timezone
 
 import streamlit as st
@@ -18,7 +19,9 @@ from components.theme import (
     ACCENT_PURPLE,
     ACCENT_YELLOW,
     TEXT_DIM,
+    TEXT_PRIMARY,
 )
+from core.time_machine import TimeMachineEntry, get_time_machine_entry
 from export_html import build_overview_page_html
 
 
@@ -31,6 +34,119 @@ def _stat_html(value: str, label: str, color: str) -> str:
         f'<p style="font-size:11px;color:{TEXT_DIM};margin:4px 0 0 0">{label}</p>'
         f"</div>"
     )
+
+
+def _time_machine_location_html(entry: TimeMachineEntry) -> str:
+    """Return HTML for the Time Machine card's location line, or "" if unknown."""
+    if entry.location is None:
+        return ""
+    parts = [p for p in (entry.location.city, entry.location.state, entry.location.country) if p]
+    if not parts:
+        return ""
+    return (
+        f'<p style="font-size:13px;color:{TEXT_PRIMARY};margin:0 0 0.5rem 0">'
+        f'<strong style="color:{ACCENT_CYAN}">Where you were —</strong> {", ".join(parts)}</p>'
+    )
+
+
+def _time_machine_listening_html(entry: TimeMachineEntry) -> str:
+    """Return HTML for the Time Machine card's listening line, or "" if no scrobbles."""
+    listening = entry.listening
+    if listening is None or listening.scrobble_count == 0:
+        return ""
+    summary = f"{listening.scrobble_count:,} scrobble{'s' if listening.scrobble_count != 1 else ''}"
+    if listening.top_artist:
+        summary += f" &middot; top artist: {listening.top_artist}"
+    lines = [
+        f'<p style="font-size:13px;color:{TEXT_PRIMARY};margin:0 0 0.25rem 0">'
+        f'<strong style="color:{ACCENT_INDIGO}">What you were listening to —</strong> {summary}</p>'
+    ]
+    if listening.sample_tracks:
+        tracks = ", ".join(listening.sample_tracks)
+        lines.append(f'<p style="font-size:12px;color:{TEXT_DIM};margin:0 0 0.5rem 0">{tracks}</p>')
+    return "".join(lines)
+
+
+def _time_machine_events_html(entry: TimeMachineEntry) -> str:
+    """Return HTML for the Time Machine card's events line, or "" if none."""
+    if not entry.events:
+        return ""
+    items = []
+    for event in entry.events:
+        label = " — ".join(p for p in (event.label, event.sublabel) if p)
+        if not label:
+            continue
+        items.append(label)
+    if not items:
+        return ""
+    return (
+        f'<p style="font-size:13px;color:{TEXT_PRIMARY};margin:0 0 0.5rem 0">'
+        f'<strong style="color:{ACCENT_PINK}">What you were doing —</strong> {", ".join(items)}</p>'
+    )
+
+
+def render_time_machine_card(
+    df: DataFrame | None,
+    swarm_df: DataFrame | None,
+    today: datetime.date | None = None,
+    rng: random.Random | None = None,
+) -> None:
+    """Render the "Time Machine" this-day-in-history card.
+
+    Picks a random past year (relative to ``today``) that has at least one matching
+    record on today's month/day across listening, location, or events data, and shows
+    a compact card summarizing where the user was, what they were listening to, and
+    what else they were doing (check-ins, photos, drinks, etc.). Degrades gracefully to
+    an empty-state message when no historical data exists for any candidate year.
+
+    Args:
+        df: The Last.fm-shaped what-when frame from ``st.session_state['df']``.
+        swarm_df: The where-when frame from ``st.session_state['swarm_df']``.
+        today: The reference "today" date; defaults to the real current date. Callers
+            (tests) can inject a fixed date for deterministic behavior.
+        rng: A ``random.Random`` instance for deterministic year selection in tests;
+            defaults to real wall-clock randomness.
+    """
+    resolved_today = today if today is not None else datetime.date.today()
+    activity_df = df if df is not None else DataFrame()
+    places_df = swarm_df if swarm_df is not None else DataFrame()
+
+    entry = get_time_machine_entry(resolved_today, activity_df, places_df, rng=rng)
+
+    st.markdown(
+        f'<h2 style="font-size:16px;font-weight:700;margin:1.5rem 0 0.5rem 0;'
+        f'color:{TEXT_PRIMARY}">Time Machine</h2>',
+        unsafe_allow_html=True,
+    )
+
+    if entry is None:
+        st.info("No historical data found for this day yet. Keep tracking, and check back later.")
+        return
+
+    body_parts = [
+        _time_machine_location_html(entry),
+        _time_machine_listening_html(entry),
+        _time_machine_events_html(entry),
+    ]
+    body_html = "".join(p for p in body_parts if p)
+    if not body_html:
+        st.info("No historical data found for this day yet. Keep tracking, and check back later.")
+        return
+
+    years_label = f"{entry.years_ago} year{'s' if entry.years_ago != 1 else ''} ago"
+    date_label = entry.target_date.strftime("%B %d, %Y")
+
+    html = (
+        '<div style="background:linear-gradient(135deg,#1e1b4b,#0c1120);'
+        "border:1px solid #6366f1;border-radius:12px;padding:1.5rem 2rem;"
+        'margin-bottom:1.5rem">'
+        f'<p style="font-size:12px;color:{TEXT_DIM};margin:0 0 0.75rem 0;'
+        f'text-transform:uppercase;letter-spacing:0.08em">'
+        f"{years_label} today &middot; {date_label}</p>"
+        f"{body_html}"
+        "</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_overview() -> None:
@@ -126,3 +242,6 @@ def render_overview() -> None:
 
     parts += ["</div>", "</div>"]
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+    # ── Time Machine — "this day in history" (issue #98) ───────────────────
+    render_time_machine_card(df, swarm_df)

@@ -51,6 +51,7 @@ def load_builtin_plugins() -> None:
     from localizer.plugins.lastfm.loader import LastFmPlugin
     from localizer.plugins.letterboxd.loader import LetterboxdPlugin
     from localizer.plugins.rss.loader import RssPlugin
+    from localizer.plugins.runkeeper.loader import RunkeeperPlugin
     from localizer.plugins.storygraph.loader import StoryGraphPlugin
     from localizer.plugins.swarm.loader import SwarmPlugin
     from localizer.plugins.untappd.loader import UntappdPlugin
@@ -65,4 +66,5 @@ def load_builtin_plugins() -> None:
     REGISTRY[GoogleLocationPlugin.PLUGIN_ID] = GoogleLocationPlugin
     REGISTRY[FlickrPlugin.PLUGIN_ID] = FlickrPlugin
     REGISTRY[UntappdPlugin.PLUGIN_ID] = UntappdPlugin
+    REGISTRY[RunkeeperPlugin.PLUGIN_ID] = RunkeeperPlugin
     REGISTRY[StoryGraphPlugin.PLUGIN_ID] = StoryGraphPlugin
