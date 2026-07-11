@@ -128,14 +128,26 @@ class LetterboxdPlugin(SourcePlugin):
 
                 name = row.get("Name", "")
                 year = str(row.get("Year", "") or "")
-                rating = str(row.get("Rating", "") or "")
+
+                rating_str = (row.get("Rating", "") or "").strip()
+                rating: float | None
+                try:
+                    rating = float(rating_str) if rating_str else None
+                except ValueError:
+                    rating = None
+
+                rewatch = (row.get("Rewatch", "") or "").strip() == "Yes"
+
+                raw = dict(row)
+                raw["rating"] = rating
+                raw["rewatch"] = rewatch
 
                 yield {
                     "source_id": "letterboxd",
                     "timestamp": timestamp,
                     "label": name,
-                    "sublabel": year,
-                    "category": rating,
-                    "raw_json": json.dumps(dict(row)),
+                    "sublabel": name,
+                    "category": year,
+                    "raw_json": json.dumps(raw),
                     "fetched_at": fetched_at,
                 }
