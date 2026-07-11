@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from analysis_utils import apply_swarm_offsets, get_assumption_location, load_assumptions
+from analysis_utils import apply_location_context, get_assumption_location, load_assumptions
 
 
 class TestLocationFallbacks(unittest.TestCase):
@@ -67,7 +67,7 @@ class TestLocationFallbacks(unittest.TestCase):
         self.assertIsNotNone(location)
         self.assertEqual(location["city"], "Co-working Space")
 
-    def test_apply_swarm_offsets_comprehensive(self):
+    def test_apply_location_context_comprehensive(self):
         # Create a Last.fm df covering many cases
         test_cases = [
             # 1. Holiday: Midsummer
@@ -97,7 +97,7 @@ class TestLocationFallbacks(unittest.TestCase):
         )
 
         swarm_df = pd.DataFrame(columns=["timestamp", "offset", "city", "venue", "lat", "lng"])
-        result_df = apply_swarm_offsets(df, swarm_df, self.assumptions)
+        result_df = apply_location_context(df, swarm_df, self.assumptions)
 
         for i, tc in enumerate(test_cases):
             self.assertEqual(

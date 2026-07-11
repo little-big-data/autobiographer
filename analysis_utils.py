@@ -535,15 +535,18 @@ def get_assumption_location(ts: int, assumptions: dict[str, Any]) -> Optional[di
     return None
 
 
-def apply_swarm_offsets(
+def apply_location_context(
     lastfm_df: pd.DataFrame,
     swarm_df: pd.DataFrame,
     assumptions: dict[str, Any],
     max_age_days: int = 30,
 ) -> pd.DataFrame:
     """
-    Adjust Last.fm track timestamps and locations based on Swarm checkins or runtime assumptions.
-    Highly optimized vectorized implementation (Issue #39 optimization).
+    Adjust Last.fm track timestamps and locations based on location-source checkins
+    (Swarm, Google Location History, Google Timeline, etc. — any ``places``-shaped
+    frame, regardless of ``source_id``) or runtime assumptions.
+    Highly optimized vectorized implementation (Issue #39 optimization; renamed
+    from ``apply_swarm_offsets`` in Issue #110 once it became source-agnostic).
     """
     if lastfm_df.empty:
         return lastfm_df
@@ -1173,7 +1176,7 @@ def build_life_chapters(
     Each chapter represents a distinct geographic period (residency segment or
     trip) with aggregated listening statistics.  Overlapping periods are
     resolved by giving trips priority over residency (matching the same
-    precedence used in ``apply_swarm_offsets``).
+    precedence used in ``apply_location_context``).
 
     Args:
         df: Listening history DataFrame with ``date_text`` (datetime) and
