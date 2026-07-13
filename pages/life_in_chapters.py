@@ -21,9 +21,12 @@ from analysis_utils import (
     build_life_chapters,
     compute_vacation_stats,
     detect_trip_periods,
+    get_life_chapters_cache_key,
     label_listening_context,
     load_assumptions,
     load_detected_trips_cache,
+    load_life_chapters_cache,
+    save_life_chapters_cache,
 )
 from components.theme import (
     ACCENT_INDIGO,
@@ -549,12 +552,43 @@ def render_life_in_chapters() -> None:
     # because neither df nor assumptions changes when the user moves between years.
     _lic_key = (id(df), hash(json.dumps(merged_assumptions, sort_keys=True, default=str)))
     if st.session_state.get("_lic_cache_key") != _lic_key:
-        _chapters_all = build_life_chapters(df, merged_assumptions)
-        _trip_periods = detect_trip_periods(
-            merged_assumptions,
-            swarm_df=swarm_df if swarm_df is not None else pd.DataFrame(),
-        )
-        _df_labeled = label_listening_context(df, _trip_periods)
+        # Disk-cache layer (issue #92): survives cold starts / server restarts,
+        # unlike the in-session guard above. Keyed on whichever data-loading
+        # identity (broker or legacy) is active this session, combined with a
+        # hash of merged_assumptions.
+        broker_identity = st.session_state.get("_loaded_store_identity")
+        legacy_config = st.session_state.get("_loaded_config")
+        # get_life_chapters_cache_key()'s legacy_config branch delegates to
+        # get_cache_key(*legacy_config), which requires a real 4-string tuple
+        # (it calls os.path.exists() on the first element). Treat anything
+        # else — e.g. an incomplete/placeholder config — as "no legacy config"
+        # rather than let a malformed tuple raise from deep inside that call.
+        if not (
+            isinstance(legacy_config, tuple)
+            and len(legacy_config) == 4
+            and all(isinstance(part, str) for part in legacy_config)
+        ):
+            legacy_config = None
+        cache_key = get_life_chapters_cache_key(broker_identity, legacy_config, merged_assumptions)
+
+        disk_cached = load_life_chapters_cache(cache_key)
+        if disk_cached is not None:
+            _chapters_all, _trip_periods = disk_cached
+            _df_labeled = label_listening_context(df, _trip_periods)
+        else:
+            _chapters_all = build_life_chapters(df, merged_assumptions)
+            _trip_periods = detect_trip_periods(
+                merged_assumptions,
+                swarm_df=swarm_df if swarm_df is not None else pd.DataFrame(),
+            )
+            _df_labeled = label_listening_context(df, _trip_periods)
+            try:
+                save_life_chapters_cache(cache_key, _chapters_all, _trip_periods)
+            except Exception:  # noqa: BLE001, S110 — disk-write failure (permissions,
+                # full disk, etc.) must never prevent the already-computed page
+                # from rendering.
+                pass
+
         st.session_state["_lic_cache_key"] = _lic_key
         st.session_state["_lic_chapters"] = _chapters_all
         st.session_state["_lic_trip_periods"] = _trip_periods
