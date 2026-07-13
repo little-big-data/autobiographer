@@ -518,5 +518,172 @@ class TestGetDiningSoundtrackData(unittest.TestCase):
         self.assertEqual(get_dining_soundtrack_data(bad_swarm, listens), {})
 
 
+class TestGetDailyActivity(unittest.TestCase):
+    """Tests for get_daily_activity (issue #27 — activity calendar heatmap prep).
+
+    Subtask 1 of the activity-calendar-heatmap plan. get_daily_activity does not
+    exist yet in analysis_utils.py, so each test imports it locally (matching this
+    file's established convention for functions under active TDD, e.g.
+    TestClassifyVenueCategory / TestGetDiningSoundtrackData above) so that a
+    missing symbol only fails the tests that need it, not the whole module.
+    """
+
+    @staticmethod
+    def _unix_seconds(date_str: str) -> int:
+        """Convert a calendar-day string to Unix seconds at noon UTC.
+
+        Noon (not midnight) avoids any accidental day-boundary flip when the
+        implementation's tz-normalization path (unit="s", utc=True) is applied.
+        """
+        return int(pd.Timestamp(f"{date_str} 12:00:00", tz="UTC").timestamp())
+
+    def _music_df(self, date_texts: list) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "artist": [f"Artist {i}" for i in range(len(date_texts))],
+                "date_text": pd.to_datetime(date_texts),
+            }
+        )
+
+    def _swarm_df(self, date_strs: list) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "venue": [f"Venue {i}" for i in range(len(date_strs))],
+                "timestamp": [self._unix_seconds(d) for d in date_strs],
+            }
+        )
+
+    # -- zero-fill correctness -------------------------------------------------
+
+    def test_music_source_zero_fills_internal_gap(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-01-01 10:00", "2024-01-03 09:00"])
+        result = get_daily_activity(df, source="music")
+
+        self.assertEqual(len(result), 3)
+        self.assertListEqual(
+            list(result["date"].dt.strftime("%Y-%m-%d")),
+            ["2024-01-01", "2024-01-02", "2024-01-03"],
+        )
+        self.assertListEqual(list(result["value"]), [1, 0, 1])
+
+    def test_music_source_single_day_range_returns_one_row(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-06-15 08:00"])
+        result = get_daily_activity(df, source="music")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["date"].strftime("%Y-%m-%d"), "2024-06-15")
+        self.assertEqual(int(result.iloc[0]["value"]), 1)
+
+    def test_music_source_duplicate_day_counts_correctly(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-01-01 08:00", "2024-01-01 09:00", "2024-01-01 20:00"])
+        result = get_daily_activity(df, source="music")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(int(result.iloc[0]["value"]), 3)
+
+    # -- multi-source summation and source-filter isolation --------------------
+
+    def test_all_source_sums_multiple_sources(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-01-01 09:00", "2024-01-01 10:00"])
+        swarm_df = self._swarm_df(["2024-01-01", "2024-01-02"])
+        result = get_daily_activity(df, swarm_df, source="all")
+
+        by_date = dict(zip(result["date"].dt.strftime("%Y-%m-%d"), result["value"]))
+        self.assertEqual(int(by_date["2024-01-01"]), 3)
+        self.assertEqual(int(by_date["2024-01-02"]), 1)
+
+    def test_checkins_source_ignores_df_changes(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        swarm_df = self._swarm_df(["2024-01-01", "2024-01-02"])
+        df_a = self._music_df(["2024-01-01 09:00"])
+        df_b = self._music_df(["2024-05-05 09:00", "2024-05-06 10:00", "2024-05-07 11:00"])
+
+        result_a = get_daily_activity(df_a, swarm_df, source="checkins")
+        result_b = get_daily_activity(df_b, swarm_df, source="checkins")
+
+        pd.testing.assert_frame_equal(
+            result_a.reset_index(drop=True), result_b.reset_index(drop=True)
+        )
+
+    def test_music_source_ignores_swarm_df(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-01-01 09:00", "2024-01-02 10:00"])
+        swarm_a = self._swarm_df(["2024-09-01"])
+        swarm_b = self._swarm_df(["2024-09-01", "2024-09-02", "2024-09-03"])
+
+        result_a = get_daily_activity(df, swarm_a, source="music")
+        result_b = get_daily_activity(df, swarm_b, source="music")
+
+        pd.testing.assert_frame_equal(
+            result_a.reset_index(drop=True), result_b.reset_index(drop=True)
+        )
+
+    # -- empty / None input handling --------------------------------------------
+
+    def _assert_empty_result(self, result: pd.DataFrame) -> None:
+        self.assertListEqual(list(result.columns), ["date", "value"])
+        self.assertEqual(len(result), 0)
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(result["date"]))
+
+    def test_none_inputs_all_source_returns_empty(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        result = get_daily_activity(None, None, source="all")
+        self._assert_empty_result(result)
+
+    def test_none_df_music_source_returns_empty(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        result = get_daily_activity(None, source="music")
+        self._assert_empty_result(result)
+
+    def test_none_swarm_df_checkins_source_returns_empty(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        result = get_daily_activity(None, None, source="checkins")
+        self._assert_empty_result(result)
+
+    def test_empty_dataframes_return_empty(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        empty_music = pd.DataFrame(columns=["artist", "date_text"])
+        empty_swarm = pd.DataFrame(columns=["venue", "timestamp"])
+
+        self._assert_empty_result(get_daily_activity(empty_music, source="music"))
+        self._assert_empty_result(get_daily_activity(None, empty_swarm, source="checkins"))
+        self._assert_empty_result(get_daily_activity(empty_music, empty_swarm, source="all"))
+
+    # -- invalid source ----------------------------------------------------------
+
+    def test_invalid_source_raises_value_error_with_bad_value(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        df = self._music_df(["2024-01-01 09:00"])
+        with self.assertRaises(ValueError) as ctx:
+            get_daily_activity(df, source="bogus")
+        self.assertIn("bogus", str(ctx.exception))
+
+    # -- tz handling ---------------------------------------------------------------
+
+    def test_date_column_tz_naive_when_only_swarm_df(self) -> None:
+        from analysis_utils import get_daily_activity
+
+        swarm_df = self._swarm_df(["2024-02-01", "2024-02-02"])
+        result = get_daily_activity(None, swarm_df, source="checkins")
+
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(result["date"]))
+        self.assertIsNone(result["date"].dt.tz)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,15 @@ SEQUENTIAL_SCALE: list[list[object]] = [
     [1.0, ACCENT_CYAN],
 ]
 
+# Calendar heatmap scale (GitHub-contribution-graph style, issue #27) —
+# dark card background → dark-indigo → indigo → cyan.
+CALENDAR_HEATMAP_SCALE: list[list[object]] = [
+    [0.0, CARD_BG],
+    [0.3, "#312e81"],
+    [0.7, ACCENT_INDIGO],
+    [1.0, ACCENT_CYAN],
+]
+
 # ---------------------------------------------------------------------------
 # Backward-compatible aliases — used by music.py traces and record_flythrough
 # ---------------------------------------------------------------------------
