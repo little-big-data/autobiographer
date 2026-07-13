@@ -1,557 +1,587 @@
 # Handoff
 
 ## Plan Status
-status: COMPLETE
+status: IN_PROGRESS
 
 ## Task Overview
 
-**The bug (issue #93)**: real Foursquare/Swarm exports have an empty `categories` array on
-every venue object — confirmed by reading the export-format handling in
-`packages/localizer/src/localizer/plugins/swarm/loader.py`. This makes `place_type` always `""`
-in `SwarmPlugin.fetch_records()`, which becomes `venue_category` always `""` after
-`core/localizer_frames.py::places_to_swarm_frame()`'s pure rename/passthrough. Downstream,
-`analysis_utils.py`'s `_classify_venue_category()` / `_CATEGORY_RULES` (used by
-`get_dining_soundtrack_data()`, issue #81) and `TRANSIT_CATEGORY_KEYWORDS` (used by
-`get_transit_days()`, issue #83) never match against an all-empty column, so both shipped
-features silently return empty results for every real user, with no error surfaced.
+**Issue #92 — "Improved Caching and Loading."** Two asks: (1) general initial renders should
+be fast/backgrounded (confirmed by the issue's own "Current Behavior" section to already be
+"adequate: several seconds" app-wide — no fix needed there), and (2) **Life in Chapters**
+specifically is slow (~30s) and — critically — **repeats that cost after every Year-carousel
+click**, and should get "a much better caching strategy... precomputed and stored in the cache."
+This plan scopes to (2) only, which is where all real work is.
 
-**The fix (Option 2 from the issue, already decided — offline-first, no new dependencies, no
-network calls, per CLAUDE.md Section 3)**: infer a `place_type` string from the venue **name**
-when `categories` is empty, using a keyword-matching heuristic scoped to Swarm/Foursquare naming
-conventions. The synthesized value reuses the exact keyword vocabulary the downstream classifiers
-already recognize (`_CATEGORY_RULES` substrings for dining, `TRANSIT_CATEGORY_KEYWORDS`
-substrings for transit — both read in full during planning, see below), so
-`analysis_utils.py` needs **zero changes**. When no heuristic pattern matches, `place_type`
-stays `""` exactly as it does today — no regression, no forced guess, no crash.
+**Confirmed: the carousel-repeat symptom is already partially fixed and verified safe.**
+Commit `ea48138` (#91) added an in-memory `st.session_state` guard in
+`pages/life_in_chapters.py::render_life_in_chapters()` (lines 548-561): a `_lic_key = (id(df),
+hash(json.dumps(merged_assumptions, sort_keys=True, default=str)))` tuple gates whether
+`build_life_chapters()` / `detect_trip_periods()` / `label_listening_context()` re-run. Read the
+carousel button handlers directly (lines 600-626): clicking ◀/▶ only writes
+`st.session_state["chapters_selected_year"]` and calls `st.rerun()` — it never touches `df`,
+`merged_assumptions`, or `_lic_cache_key`. So `_lic_key` is unchanged across a carousel click and
+the expensive block is correctly skipped. **No bug here; no change needed to the carousel
+handlers.** What #91 does *not* fix — and what issue #92 is actually asking for — is that this
+guard lives only in `st.session_state`, so it is lost on every fresh browser session, server
+restart, or page reload. That cold-start cost is the real target.
 
-**Design decision — where the heuristic lives (and why)**: in
-`packages/localizer/src/localizer/plugins/swarm/loader.py`, as a new private, pure module-level
-function (`_infer_place_type_from_name(venue_name: str) -> str`) plus a name-pattern rule table,
-called from `fetch_records()` only when `categories` is empty/missing. **Not** in
-`analysis_utils.py`. Rationale: the vocabulary here (airport/station/pizza/cafe-style *name*
-patterns) is Foursquare/Swarm-specific naming convention, not a generic place-classification
-concern — `analysis_utils.py` is shared by every source in the unified places layer (Google
-Location History, etc. — see project memory on the places layer), and adding Swarm-specific name
-heuristics there would be the wrong layer for it. Keeping the fix in the plugin loader also means
-`analysis_utils.py`'s well-tested classifiers require zero changes (smallest possible blast
-radius) and the heuristic is unit-testable in complete isolation from real personal data, using
-the same synthetic-fixture style already established in `packages/localizer/tests/test_swarm_plugin.py`.
-**Assumption flagged**: if a reviewer disagrees and prefers a shared `analysis_utils.py` function
-instead, that changes Subtask 1's file target and Subtask 3's integration-test shape — but the
-rationale above (scope, blast radius, existing test conventions) is the basis for this call.
+**Root cause / cost drivers, confirmed by reading the functions:**
+- `build_life_chapters()` (`analysis_utils.py:1169`): one full `groupby("artist")` pass for
+  first-heard dates, then a per-period Python loop with nested per-artist dict lookups for
+  discovery-count and chapter-exclusive-artist scoring.
+- `detect_trip_periods()` (`analysis_utils.py:1024`): groups `swarm_df` by day and walks
+  consecutive-day runs to find trips.
+- `label_listening_context()` (`analysis_utils.py:1086`): cheap by comparison — one `home`/`trip`
+  vectorized mask assignment **per trip period** (not per row), applied to the full listening
+  history.
 
-**`core/localizer_frames.py::places_to_swarm_frame()` needs no change** — confirmed by reading
-it: it is a pure column rename/passthrough (`place_type` → `venue_category`), with no
-classification logic of its own. The fix belongs upstream (the plugin loader), not here.
+Because `label_listening_context()`'s cost scales with trip-period *count*, not row count, it
+stays fast even against a large history — so it does **not** need disk caching. `build_life_chapters()`
+and `detect_trip_periods()` are the two functions whose *output* (not the full labeled DataFrame)
+is worth precomputing and persisting.
 
-**Cache files need no new invalidation logic** — confirmed by reading `pages/data_sources.py`
-(~lines 284-399): `swarm_transit_days.json` (`TRANSIT_DAYS_CACHE`) and `swarm_dining.json`
-(`DINING_CACHE`) are only written when the user clicks "Build Swarm Analysis Cache", which calls
-`get_transit_days(swarm_df)` / `get_dining_soundtrack_data(swarm_df, df)` fresh from the
-currently-loaded DataFrames every time. There is no staleness-detection or diffing logic to
-update — once the heuristic populates non-empty `venue_category` values, the very next cache
-rebuild naturally picks up correct results. No cache-invalidation subtask is included.
+**Design decision — what gets cached to disk.** Cache only `chapters` (from `build_life_chapters()`)
+and `trip_periods` (from `detect_trip_periods()`) — both small (tens to low-hundreds of entries).
+Do **not** cache `df_labeled` (the full per-row listening history with a `context` column): it can
+be many tens of thousands of rows, would bloat `data/cache/` for no reason, and — per the above —
+recomputing it from the (now-cached) `trip_periods` via `label_listening_context(df, trip_periods)`
+is already fast. This keeps the new cache payload small and keeps `analysis_utils.py`'s existing,
+well-tested functions completely unchanged (no signature or behavior changes to any of the three).
 
-**Confirmed scope boundary**: `SwarmPlugin` lives only under `packages/localizer/` (the active
-plugin system per project memory on the two-plugin-system migration). Nothing under the legacy
-`plugins/sources/` tree is touched by this plan.
+**Design decision — UX: transparent write-through, not an opt-in "Build Cache" button.**
+Read `pages/data_sources.py` in full around the Deep Analysis (`_render_deep_analysis_compute`,
+~line 618) and Swarm Analysis Cache (`_render_swarm_analysis`, ~line 280) flows: **both existing
+cache families are opt-in-gated** — the consuming pages (`venue_patterns.py`, `city_soundtracks.py`,
+etc.) show a "hasn't been calculated yet, click X" banner via `_deep_analysis_not_computed_banner()`
+until the user explicitly clicks a "Build/Calculate ... Cache" button. Life in Chapters has never
+worked that way — it renders immediately today, just slowly on cold start. Issue #92's own
+"Expected Behavior" explicitly asks for initial renders to be fast *without* a manual step
+("populating in the background", "precalculated and stored"). Introducing an opt-in button here
+would be a real UX regression (a zero-config page would suddenly require a click) and doesn't match
+what was asked. **Decision: make the disk cache transparent and self-populating** — first render
+after a cold start computes normally (same ~30s as today, unavoidable once) and silently writes the
+result to disk; every subsequent cold start (new session, browser reload, server restart) reads the
+disk cache instead of recomputing, until the underlying data or assumptions change. This is a
+deliberate, justified departure from the opt-in convention used by the two existing cache families,
+made because Life in Chapters was never opt-in to begin with.
 
-**Shared-source-file note**: Subtasks 1 and 2 both touch `loader.py` (Subtask 1 adds the pure
-heuristic function; Subtask 2 wires it into `fetch_records()`). This is safe because `current:`
-ordering is strictly sequential (Subtask 1 completes — reaches `APPROVED` — before Subtask 2's
-coder phase starts) and Subtask 2 declares `Depends On: 1`, so there is never a concurrent writer
-of `loader.py`. Test files are kept fully disjoint per subtask (see Files to Touch below) so the
-parallel test-ahead batch never has two testers writing the same file.
+**Design decision — cache key / invalidation, reusing established primitives instead of inventing
+new ones.** Read `components/sidebar.py` in full: this codebase has **two data-loading modes**,
+and both already expose a ready-made identity primitive:
+- **Broker mode** (DuckDB store present): `st.session_state["_loaded_store_identity"]` =
+  `(store_path, store_mtime, assumptions_path)`, written by `_broker_store_identity()`
+  (`sidebar.py:100`) and already used to detect when the store needs reloading.
+- **Legacy mode** (no store): `st.session_state["_loaded_config"]` =
+  `(file_path, swarm_dir, assumptions_path, timeline_path)`, and `analysis_utils.get_cache_key()`
+  (line 27) — the exact helper CLAUDE.md Section 5 says to reuse — already turns that 4-tuple into
+  a stable MD5 hash for the existing raw-dataframe file cache (`sidebar.py:277`).
 
-**Full `_CATEGORY_RULES` list** (from `analysis_utils.py`, lines 1591-1631 — 37 rules mapping a
-lowercase substring to one of 4 buckets): `fast food`, `burger`, `pizza`, `fried chicken`,
-`hot dog`, `sandwich` → Fast Food; `bar`, `nightclub`, `pub`, `brewery`, `wine`, `cocktail`,
-`lounge`, `club` → Bars & Nightlife; `cafe`, `café`, `coffee`, `tea room`, `bakery`, `dessert`,
-`ice cream`, `juice bar` → Cafes; `restaurant`, `diner`, `food`, `sushi`, `ramen`, `noodle`,
-`steakhouse`, `bbq`, `seafood`, `bistro`, `brasserie`, `tapas`, `dim sum`, `buffet`, `grill`,
-`kitchen`, `eatery` → Restaurants.
+Neither of these alone is sufficient: `merged_assumptions` in `life_in_chapters.py` also folds in
+`load_detected_trips_cache()`'s output (line 534-539), which can change (e.g. after the user clicks
+"Build Swarm Analysis Cache") **without** the assumptions file's mtime changing. So the disk cache
+key must combine (a) whichever of the two identity primitives above is active this session, with
+(b) a hash of `merged_assumptions` — exactly the second half of the existing in-session `_lic_key`,
+reused unchanged. New pure function `analysis_utils.get_life_chapters_cache_key(broker_identity,
+legacy_config, merged_assumptions)` computes this; it takes plain values (no `streamlit` import),
+keeping the utility layer framework-agnostic per CLAUDE.md's Streamlit Conventions. The caller
+(`life_in_chapters.py`) resolves which session-state identity is active and passes it in.
 
-**Full `TRANSIT_CATEGORY_KEYWORDS` list** (from `analysis_utils.py`, lines 1498-1516 — matched
-case-insensitively via `.str.contains`): `Airport`, `Train Station`, `Transit`, `Bus Station`,
-`Metro`, `Subway`, `Ferry`, `Port`, `Rail`, `Rest Area`, `Rest Stop`, `Travel Plaza`,
-`Service Plaza`, `Turnpike`, `Toll`, `Gas Station`, `Truck Stop`.
+**Design decision — Timestamp serialization.** `chapters` entries and `trip_periods` tuples contain
+`pd.Timestamp` values, which JSON cannot represent natively — this is the wrinkle flagged before
+investigation. Good news: `analysis_utils.py` already has a `_DeepCacheEncoder` (line 1918) used by
+`_save_deep_cache()` that serializes `pd.Timestamp` via `.isoformat()` — so **writing** needs no new
+code, just reuse of the existing private helpers. **Reading** is the genuinely new piece: none of
+the 8 existing `load_deep_*_cache()` functions need to reconstruct `pd.Timestamp` objects (their
+consumers, e.g. `venue_patterns.py`, only display the raw JSON), but Life in Chapters' rendering
+code calls `.year`, `.strftime()`, `.date()`, `.normalize()` etc. directly on chapter `start`/`end`
+and on `trip_periods` — so the new `load_life_chapters_cache()` must explicitly parse the ISO
+strings back into `pd.Timestamp` before returning. This is new code, confined to one loader
+function.
 
-**Non-overlap constraint for the new name-heuristic rule table (Subtask 1)**: every synthesized
-`place_type` value must contain at least one of the two lists above (so the existing classifiers
-fire unchanged), and the coder must avoid overly broad name-substring rules that would produce
-false positives — e.g. do **not** add a bare `"port"` name-pattern rule (would false-positive on
-venue names like "Portland" or "Import Foods"); do **not** add a bare `"club"` name-pattern rule
-without disambiguating from generic use. Prefer specific, low-collision name substrings (e.g.
-`"airport"`, `"pizza"`, `"metro station"`, `"train station"`, `"coffee"`) over generic ones.
+**Design decision — timing proof uses call-elision, not wall-clock assertions.** A literal
+before/after wall-clock timing test would be flaky in CI (machine-dependent, and the ~30s figure
+came from a large real dataset that cannot be reproduced with synthetic test fixtures without an
+enormous, slow test). Instead, the deterministic, CI-safe proxy for "the cache actually makes this
+faster" is: **assert `build_life_chapters()` / `detect_trip_periods()` are not called at all when a
+matching disk cache is present** (mocked and asserted via `.called`), which is the actual mechanism
+that produces the speedup. Both subtasks' acceptance criteria use this proxy.
 
-**Privacy constraint (CLAUDE.md Section 3)**: no real personal venue names anywhere in code or
-tests. All test fixtures use clearly synthetic/generic names (e.g. "O'Hare International
-Airport", "Joe's Pizza Place", "Downtown Metro Station", "Generic City Museum").
+**Confirmed: no other files need to change.**
+- `_render_cache_tab()`'s "Clear Local Cache" button (`pages/data_sources.py:571`) already does
+  `shutil.rmtree("data/cache")` — the new cache file lives in that same directory and is wiped for
+  free; no changes needed there.
+- Neither the Deep Analysis 8-cache registry/grid nor the Swarm Analysis Cache button flow need to
+  register the new cache — per the UX decision above, Life in Chapters' cache is deliberately **not**
+  part of either opt-in family.
+- No atomic temp-file-then-rename write logic is introduced: all 8 existing deep caches already
+  write directly via `open(path, "w")` with no atomicity guard, and this is a single-user local
+  Streamlit deployment (per CLAUDE.md's personal-data framing) — matching that existing convention
+  rather than introducing new complexity here.
+
+**Test file disjointness (the previous plan for issue #93 was sent back for revision for missing
+this):** `tests/test_deep_cache.py` already exists and is exactly the established home for
+save/load-roundtrip tests on the deep-cache helpers (Subtask 1). `tests/test_life_in_chapters.py`
+already exists and is the established home for `render_life_in_chapters()` integration tests
+(Subtask 2). These two files are fully disjoint, so the parallel test-ahead batch has no
+shared-file-writer conflict.
+
+**Privacy (CLAUDE.md Section 3):** all new tests use only synthetic data (already the convention in
+both target test files — synthetic artists/dates/cities). No real personal data is touched by this
+plan.
 
 **Architecture context**: no prior `/feature-dev` or `/plan-feature` run occurred for this task.
 This plan is investigation-driven — every claim above was verified by reading the actual files
-(`loader.py`, `localizer_frames.py`, `analysis_utils.py`, `pages/data_sources.py`,
-`test_swarm_plugin.py`, `test_analysis_utils.py`), not inferred from the issue text alone.
+(`pages/life_in_chapters.py`, `analysis_utils.py`, `pages/data_sources.py`, `components/sidebar.py`,
+`tests/test_deep_cache.py`, `tests/test_life_in_chapters.py`), not inferred from the issue text alone.
 
-Plan Review: APPROVED — the three subtasks (name-heuristic function, fetch_records() wiring, end-to-end integration test + docs) have disjoint test files, a valid acyclic dependency chain (1 → 2 → {1,2}) matching the `current:` topological order, sufficient falsifiable acceptance criteria and test guidance including the new empty-categories/empty-name edge case in Subtask 2, and the shared `loader.py` source-file edit across Subtasks 1–2 is safe under this workflow's strictly-sequential (non-Phase-2) coder/reviewer/owner execution.
+Plan Review: APPROVED — Independently re-verified every factual claim against the actual repo
+(lines 548-561 and 600-626 of `life_in_chapters.py`, `analysis_utils.py`'s `get_cache_key`/
+`_DeepCacheEncoder`/`_load_deep_cache`/`_save_deep_cache`/function signatures at 1024/1086/1169,
+`sidebar.py`'s `_broker_store_identity`/`_loaded_config`/`_loaded_store_identity` contract including
+the broker-mode `("", "", assumptions_path, "")` 4-tuple, `data_sources.py`'s opt-in Deep Analysis
+banner vs. `_render_cache_tab`'s `rmtree("data/cache")`, and both target test files' existing
+fixtures/conventions) — all confirmed accurate, not just plausible. The transparent write-through UX
+decision is well-justified (Life in Chapters was never opt-in; the issue asks for no manual step) and
+explicitly documented as a deliberate departure from the Deep/Swarm Analysis button convention. The
+cache-key design correctly handles all three invalidation scenarios (different data, edited
+assumptions content via the merged_assumptions hash, and broker/legacy mode switches) because it
+combines the coarse identity tuple with a hash of the actual parsed `merged_assumptions` content, not
+just file mtimes. The Timestamp round-trip claim is accurate: `_DeepCacheEncoder` already handles
+writing via `.isoformat()`, but none of the 8 existing loaders reconstruct `pd.Timestamp` on read, so
+`load_life_chapters_cache`'s rehydration is genuinely new code as claimed. The call-elision timing
+proxy (asserting `build_life_chapters`/`detect_trip_periods` are not called) is a legitimate,
+deterministic, CI-safe stand-in for the unreproducible ~30s wall-clock claim. Gates: both subtasks
+have ≥5 falsifiable acceptance criteria; Files-to-Touch have zero source-file overlap and the two
+test files (`tests/test_deep_cache.py`, `tests/test_life_in_chapters.py`) are fully disjoint; the
+2-subtask dependency graph (2 depends on 1, `current: 1` first) is an acyclic, valid topological
+order; both subtasks include concrete Test Guidance naming specific edge cases (stale-key miss,
+corrupt/missing file, disk-write-failure resilience, broker-vs-legacy precedence, carousel-click
+zero-overhead regression guard).
 
 ## Current Subtask
-current: 3
+current: 2
 
 ---
 
 ## Subtasks
 
-### Subtask 1 — Add name-based venue-category heuristic function
+### Subtask 1 — Add Life Chapters disk-cache key, save, and load functions
 
 **Status**: APPROVED
 
-**PR Group**: venue-category-heuristics
+**PR Group**: life-chapters-disk-cache
 
 **Depends On**: none
 
 **Description**:
-Add a new private, pure function `_infer_place_type_from_name(venue_name: str) -> str` to
-`packages/localizer/src/localizer/plugins/swarm/loader.py`, plus a name-pattern rule table (e.g.
-`_NAME_HEURISTIC_RULES: list[tuple[str, str]]`, mirroring the `(substring, result)` list style
-already used by `analysis_utils._CATEGORY_RULES`). The function lower-cases `venue_name` and
-checks it against the rule table in order, returning the first matching rule's synthesized
-`place_type` string. Each synthesized value must contain at least one substring from the full
-`_CATEGORY_RULES` list or the full `TRANSIT_CATEGORY_KEYWORDS` list quoted in the Task Overview,
-so the existing downstream classifiers recognize it unchanged. Returns `""` when no pattern
-matches (never `None`, never raises). This subtask does not wire the function into
-`fetch_records()` yet — that is Subtask 2. No changes to `analysis_utils.py`.
+Add to `analysis_utils.py`:
+- `LIFE_CHAPTERS_CACHE: str = os.path.join("data", "cache", "life_chapters.json")` (new constant,
+  alongside the existing `DETECTED_TRIPS_CACHE` / `TRANSIT_DAYS_CACHE` / `DINING_CACHE` constants).
+- `get_life_chapters_cache_key(broker_identity: tuple[Any, ...] | None, legacy_config: tuple[str,
+  str, str, str] | None, merged_assumptions: dict[str, Any]) -> str` — a pure function (no
+  `streamlit` import). If `broker_identity` is not `None`, use it as the base identity; otherwise if
+  `legacy_config` is not `None`, use `get_cache_key(*legacy_config)` (the existing helper) as the
+  base identity; otherwise use a fixed sentinel base (e.g. `"none"`). Combine the base identity with
+  an MD5 hash of `json.dumps(merged_assumptions, sort_keys=True, default=str)` (identical
+  serialization to the existing in-session `_lic_key` in `life_in_chapters.py`) into a single
+  deterministic hex digest.
+- `save_life_chapters_cache(cache_key: str, chapters: list[dict[str, Any]], trip_periods:
+  list[tuple[pd.Timestamp, pd.Timestamp]], path: str = LIFE_CHAPTERS_CACHE) -> None` — builds a
+  JSON payload `{"cache_key": cache_key, "chapters": chapters, "trip_periods": [[s, e] for s, e in
+  trip_periods]}` and writes it via the existing private `_save_deep_cache()` helper (which already
+  serializes `pd.Timestamp` via `_DeepCacheEncoder`).
+- `load_life_chapters_cache(cache_key: str, path: str = LIFE_CHAPTERS_CACHE) -> tuple[list[dict[str,
+  Any]], list[tuple[pd.Timestamp, pd.Timestamp]]] | None` — loads the raw JSON via the existing
+  private `_load_deep_cache()` helper; returns `None` if the file is missing, corrupt, or its stored
+  `"cache_key"` does not match the passed-in `cache_key` (stale cache → forced miss, never a stale
+  hit). On a match, reconstructs `pd.Timestamp` objects for every chapter's `"start"`/`"end"` fields
+  and for every `trip_periods` pair, and returns `(chapters, trip_periods)`.
+
+This subtask does not touch `pages/life_in_chapters.py` — wiring is Subtask 2.
 
 **Acceptance Criteria**:
-- [ ] `_infer_place_type_from_name("O'Hare International Airport")` returns a string containing
-  `"Airport"` (case-sensitive match against `TRANSIT_CATEGORY_KEYWORDS`).
-- [ ] `_infer_place_type_from_name("Downtown Metro Station")` returns a string containing one of
-  the transit keywords (e.g. `"Metro"`).
-- [ ] `_infer_place_type_from_name("Joe's Pizza Place")` returns a string whose lowercased form
-  contains `"pizza"` (matches `_CATEGORY_RULES`).
-- [ ] `_infer_place_type_from_name("Downtown Coffee Roasters")` returns a string whose lowercased
-  form contains `"coffee"`.
-- [ ] `_infer_place_type_from_name("Generic City Museum")` (no pattern matches) returns exactly
-  `""`, not `None`, and does not raise.
-- [ ] Matching is case-insensitive on the input venue name (e.g. `"downtown metro station"` in
-  all-lowercase still matches) and does not crash on an empty string or a name containing only
-  punctuation/whitespace.
+- [ ] `get_life_chapters_cache_key(None, ("a.csv", "", "assump.json", ""), {"trips": []})` is
+  deterministic — two calls with identical arguments return the identical string.
+- [ ] Changing only `merged_assumptions` (e.g. adding a trip entry) while `broker_identity` and
+  `legacy_config` stay fixed changes the returned key.
+- [ ] When both `broker_identity` and `legacy_config` are non-`None`, the key is derived from
+  `broker_identity` (broker-mode precedence, matching `components/sidebar.py`'s "opt-in when the
+  DuckDB store exists" behavior) — verified by changing `legacy_config` alone and confirming the key
+  does NOT change while `broker_identity` stays fixed.
+- [ ] `save_life_chapters_cache(key, chapters, trip_periods, path=tmp)` followed by
+  `load_life_chapters_cache(key, path=tmp)` returns `(chapters2, trip_periods2)` where every
+  chapter's `start`/`end` are `pd.Timestamp` instances equal to the originals, and every
+  `trip_periods2` pair is a `(pd.Timestamp, pd.Timestamp)` tuple equal to the original — proving
+  round-trip fidelity through JSON (the Timestamp-serialization wrinkle).
+- [ ] `load_life_chapters_cache("key-B", path=tmp)` returns `None` when the file at `tmp` was saved
+  under `"key-A"` (stale/mismatched key is treated as a miss, not a stale hit).
+- [ ] `load_life_chapters_cache("any-key", path="<nonexistent path>")` returns `None`, and a file at
+  `path` containing invalid JSON also returns `None` (matches `_load_deep_cache`'s existing
+  missing/corrupt handling — no new exception types introduced).
 
 **Files to Touch**:
-- `packages/localizer/src/localizer/plugins/swarm/loader.py`
-- `packages/localizer/tests/test_swarm_plugin.py`
+- `analysis_utils.py`
+- `tests/test_deep_cache.py` (existing file — established home for deep-cache save/load-roundtrip
+  tests; append new test classes/functions, do not modify existing tests)
 
 **Test Guidance**:
-- Cover at least one representative name per downstream bucket that must remain reachable:
-  an airport-style name, a train/metro-station-style name, a pizza-style name, a coffee/cafe-style
-  name, a bar/pub-style name, and a restaurant-style name — assert each produces a value
-  containing the expected keyword substring from the lists in the Task Overview.
-- Cover the explicit no-match fallback: a generic, non-food/non-transit venue name (e.g. "Generic
-  City Museum", "Downtown Art Gallery") must return exactly `""`.
-- Cover false-positive risk: a venue name that superficially resembles a risky substring but
-  should NOT match transit (e.g. "Portland Pizza Co." should classify as pizza/dining via the
-  `"pizza"` rule, not accidentally trip a transit `"port"`-style rule — this also verifies the
-  rule table has no bare `"port"` rule per the Task Overview's non-overlap constraint).
-- Cover case-insensitivity (mixed-case and all-lowercase venue names) and empty-string / purely
-  punctuation input (must return `""`, must not raise).
-- Use only synthetic/generic venue names — no real personal data, per CLAUDE.md Section 3.
+- Determinism and sensitivity: same inputs → same key; changing `merged_assumptions` → different
+  key; changing `legacy_config` with `broker_identity=None` → different key; changing `legacy_config`
+  while `broker_identity` is set → key unchanged (precedence proof).
+- Round-trip fidelity: build a chapters list with at least 2 entries (mix of `"kind": "residency"`
+  and `"kind": "trip"`) and a `trip_periods` list with at least 1 pair, save then load, assert
+  `pd.Timestamp` equality (not string equality) on every date field, and assert the two chapter
+  dicts are otherwise equal (`label`, `location`, `total_plays`, etc. unchanged through the
+  round-trip).
+- Stale-key and missing/corrupt-file cases per the acceptance criteria above; write a corrupt file
+  with plain non-JSON text (e.g. `"not json {"` ) to a temp path and assert `load_life_chapters_cache`
+  returns `None` rather than raising.
+- Use `tempfile.TemporaryDirectory()` for all save/load tests (matching the existing pattern already
+  used in `tests/test_deep_cache.py`'s `TestSaveLoadRoundtrip`), never writing into the real
+  `data/cache/` directory.
+- All fixture data must be synthetic (generic city/artist names), per CLAUDE.md Section 3.
 
 **Test Files**:
-- `packages/localizer/tests/test_swarm_plugin.py` — 16 tests appended (all targeting
-  `localizer.plugins.swarm.loader._infer_place_type_from_name`): airport, train/metro station,
-  pizza, coffee, bar/pub, restaurant matches; no-match fallback (parametrized: "Generic City
-  Museum", "Downtown Art Gallery"); false-positive guard ("Portland Pizza Co." must not trip a
-  bare transit "port" rule); case-insensitivity (lowercase and mixed-case); empty-string and
-  punctuation-only input (parametrized: "   ", "!!!", "...,", "---"). RED-confirmed: 0 passed, 16
-  failed, all via `ImportError: cannot import name '_infer_place_type_from_name'` (function does
-  not exist yet — genuine RED, not a vacuous test).
+- `tests/test_deep_cache.py` — 10 new tests appended (existing tests untouched):
+  `TestLifeChaptersCacheConstant::test_life_chapters_cache_constant_shape`;
+  `TestGetLifeChaptersCacheKey::{test_deterministic_same_inputs_same_key,
+  test_changing_merged_assumptions_changes_key,
+  test_changing_legacy_config_changes_key_when_broker_identity_none,
+  test_broker_identity_takes_precedence_over_legacy_config,
+  test_none_broker_and_none_legacy_uses_sentinel_and_is_deterministic}`;
+  `TestLifeChaptersCacheSaveLoadRoundtrip::test_roundtrip_preserves_timestamps_and_other_fields`;
+  `TestLifeChaptersCacheStaleAndMissing::{test_mismatched_cache_key_is_treated_as_miss,
+  test_load_missing_path_returns_none, test_load_corrupt_json_returns_none}`. All fixture data
+  synthetic. RED-confirmed: 10 failed, each with `ImportError` (target names don't exist yet in
+  `analysis_utils.py`) — genuine RED, no implementation code written by the tester.
 
 **Implementation Notes**:
-Added `_NAME_HEURISTIC_RULES: list[tuple[str, str]]` (ordered `(lowercase substring,
-synthesized place_type)` pairs) and `_infer_place_type_from_name(venue_name: str) -> str` to
-`packages/localizer/src/localizer/plugins/swarm/loader.py`, placed above the `@register`
-decorator on `SwarmPlugin`. The function returns `""` immediately for a falsy `venue_name`,
-otherwise lower-cases it and returns the first matching rule's synthesized value, else `""`.
+Added a new "Life Chapters disk cache (issue #92)" section to `analysis_utils.py`, inserted
+immediately after `get_deep_analysis_status()` (before the "Listening session detection" section),
+containing:
+- `LIFE_CHAPTERS_CACHE = os.path.join("data", "cache", "life_chapters.json")`, following the
+  existing `DETECTED_TRIPS_CACHE`/`TRANSIT_DAYS_CACHE`/`DINING_CACHE` constant convention.
+- `get_life_chapters_cache_key(broker_identity, legacy_config, merged_assumptions)` — precedence:
+  broker_identity (if not None) > legacy_config (if not None) > `"none"` sentinel. One deviation
+  from the literal plan text: for the `legacy_config` branch the base identity is
+  `f"{get_cache_key(*legacy_config)}|{legacy_config!r}"` rather than just
+  `get_cache_key(*legacy_config)` alone. Reason: `get_cache_key()` short-circuits to the fixed
+  string `"none"` whenever `lastfm_file` doesn't exist on disk (see `analysis_utils.py:34-35`), and
+  the acceptance-criteria test `test_changing_legacy_config_changes_key_when_broker_identity_none`
+  uses two different synthetic, non-existent file paths (`"a.csv"` vs `"b.csv"`, etc.) and asserts
+  the resulting keys differ. Relying on `get_cache_key()`'s return value alone would collapse both
+  to `"none"` and fail that test. Folding in `repr(legacy_config)` alongside the existing
+  `get_cache_key()` call preserves sensitivity to config changes (satisfying the test) while still
+  reusing `get_cache_key()` per the plan's intent, and does not affect the precedence test (which
+  never enters this branch when `broker_identity` is set) or any other acceptance criterion. Both
+  the base identity and `merged_assumptions` (via `json.dumps(..., sort_keys=True, default=str)`,
+  identical serialization to the existing in-session `_lic_key`) are combined into a single MD5 hex
+  digest.
+- `save_life_chapters_cache(cache_key, chapters, trip_periods, path=LIFE_CHAPTERS_CACHE)` — builds
+  the `{"cache_key", "chapters", "trip_periods"}` payload exactly as specified and delegates to the
+  existing `_save_deep_cache()` (which already serializes `pd.Timestamp` via `_DeepCacheEncoder`).
+- `load_life_chapters_cache(cache_key, path=LIFE_CHAPTERS_CACHE)` — delegates to the existing
+  `_load_deep_cache()`; returns `None` on missing/corrupt file (matching `_load_deep_cache`'s
+  existing behavior) or on `cache_key` mismatch (stale cache = forced miss); on a match, rehydrates
+  `pd.Timestamp` for every chapter's `start`/`end` and every `trip_periods` pair via `pd.Timestamp(...)`.
 
-Rule table covers the transit bucket (`airport`, `train station`, `metro station`, `subway
-station`, `bus station`, `ferry terminal`, `rail station`, `gas station`, `truck stop`, `rest
-area`, `rest stop`, `travel plaza`, `service plaza`, `turnpike`, `toll plaza`) and the dining/
-nightlife buckets from `_CATEGORY_RULES` (fast food, bars, cafes, restaurants — e.g. `pizza`,
-`coffee`, `pub`, `restaurant`, `bbq`, `sushi`, etc.). Per the Task Overview's non-overlap
-constraint, deliberately omitted a bare `"port"` rule and a bare `"club"` rule; used
-`"nightclub"` (not bare `"club"`) and no transit rule uses `"port"` as a standalone substring,
-so `"Portland Pizza Co."` correctly falls through to the `"pizza"` rule only.
+No new dependencies added; no changes to `get_cache_key`, `_save_deep_cache`, `_load_deep_cache`, or
+`_DeepCacheEncoder`. `pages/life_in_chapters.py` and `tests/test_life_in_chapters.py` untouched, per
+scope. One mypy-driven fix beyond the plan text: used `Optional[tuple[...]]` / `Optional[tuple[...] ]`
+instead of PEP 604 `X | None` syntax for the three new type annotations, because this file has no
+`from __future__ import annotations` import and mypy is pinned to `python_version = "3.9"` in
+`pyproject.toml` (PEP 604 union syntax at runtime requires 3.10+); `Optional[...]` matches the
+existing convention already used elsewhere in the file (e.g. `_get_ruptures`).
 
-No changes to `analysis_utils.py`; `fetch_records()` wiring is untouched (Subtask 2). Did not
-modify `test_swarm_plugin.py` — its 16 pre-written tests were used as-is.
-
-**Environment note (not a repo file change)**: the venv's editable install of `localizer`
-(`venv/Lib/site-packages/__editable__.localizer-0.1.0.pth`) was pointing at a stale worktree
-copy (`.claude/worktrees/agent-a23c5b3a17bb523c4/packages/localizer/src`) left over from a
-prior agent session, so tests were initially importing that stale `loader.py` instead of this
-repo's copy (masking the fix as 16 ImportErrors). Fixed by re-running
-`pip install -e packages/localizer/ --no-deps` from the repo root, which repointed the `.pth`
-file at `C:\Users\johns\Code\autobiographer\packages\localizer\src`. No source files were
-changed by this step; flagging in case future agents hit the same stale-worktree symptom.
-
-**Verification**:
-- `ruff check --fix packages/localizer/src/localizer/plugins/swarm/loader.py` → "No issues found"
-- `ruff format packages/localizer/src/localizer/plugins/swarm/loader.py` → "All files formatted correctly"
-- `pytest packages/localizer/tests/test_swarm_plugin.py -v --no-cov` → 34 passed (16 new +
-  18 pre-existing, confirming no regression)
-- `mypy packages/localizer/src/localizer/plugins/swarm/loader.py` → "No issues found"
+Verification:
+- `pytest tests/test_deep_cache.py -v --no-cov` → 31 passed, 0 failed (21 pre-existing + 10 new,
+  confirming no regression to the existing deep-cache tests).
+- `ruff check --fix analysis_utils.py` → no issues found. `ruff format analysis_utils.py` → already
+  formatted correctly.
+- `mypy analysis_utils.py` → no issues found (after the `Optional[...]` fix above; the initial PEP
+  604 syntax produced 3 `[syntax]` errors under the `python_version = "3.9"` mypy config).
 
 **Review Notes**:
-Code Review: APPROVED — checks clean. `ruff check` and `ruff format --check` on loader.py both
-clean; `mypy` clean; `pytest packages/localizer/tests/test_swarm_plugin.py -v --no-cov` → 34
-passed (18 pre-existing + 16 new, no regressions, none skipped/xfailed). Verified all 16 new
-tests genuinely exercise `_infer_place_type_from_name` (import + call + assert on the real
-return value, not vacuous). Confirmed the non-overlap constraint holds in the actual rule table:
-no bare `"port"` rule (transit rules use `"gas station"`, `"toll plaza"`, etc., never a standalone
-`"port"` substring) and no bare `"club"` rule (`"nightclub"` only) — traced `"Portland Pizza
-Co."` through the rule list by hand and confirmed it falls through all transit rules and matches
-only `"pizza"`. Cross-checked every synthesized value against `_CATEGORY_RULES` /
-`TRANSIT_CATEGORY_KEYWORDS` and confirmed each contains a recognized substring (matching is
-case-insensitive downstream via `.lower()` / `case=False`, so the capitalized synthesized values
-work correctly). Confirmed `fetch_records()` is untouched — the function is added but not yet
-wired in, correctly scoped to Subtask 2.
+Code Review: APPROVED — checks clean. `ruff check`, `ruff format --check`, and `mypy` all report
+no issues on `analysis_utils.py`; `pytest tests/test_deep_cache.py -v --no-cov` → 31 passed (21
+pre-existing + 10 new), 0 failed. Manual review of the diff found no dead code, no secrets, no N+1
+patterns, and full null/error-handling parity with the existing `_load_deep_cache`/`_save_deep_cache`
+helpers it reuses. The flagged deviation (`base = f"{get_cache_key(*legacy_config)}|{legacy_config!r}"`
+instead of `get_cache_key(*legacy_config)` alone) is sound: (1) it still satisfies the AC's intent —
+deterministic (legacy_config is an all-`str` 4-tuple, so `repr()` is stable) and sensitive to any
+config change, verified by both `test_changing_legacy_config_changes_key_when_broker_identity_none`
+and `test_broker_identity_takes_precedence_over_legacy_config` passing; (2) no security regression —
+the `repr(legacy_config)` text (which can contain local file paths) is only ever folded into the
+*pre-hash* `base` string, never returned or persisted directly; the function's only output is the
+final `hashlib.md5(...).hexdigest()`, exactly mirroring `get_cache_key()`'s own existing pattern of
+joining raw file paths into `key_parts` before hashing (`analysis_utils.py:38-58`) — this is the
+established norm in this file, not a new exposure, and the only persisted artifact
+(`save_life_chapters_cache`'s `"cache_key"` field) is the opaque digest, never the raw base string;
+(3) real-world behavior with existing files is preserved — `get_cache_key()`'s real mtime-based
+content hash still fully participates in `base` (it's the first half of the joined string), so
+`repr(legacy_config)` is strictly additive (an extra invalidation trigger on config-tuple changes,
+e.g. a changed path with unchanged mtime), never a replacement for the content-hash signal. No
+concerns found; no changes requested.
 
-Owner: APPROVED — independently re-ran the gate: `ruff check` on loader.py + test_swarm_plugin.py
-→ "All checks passed!"; `pytest packages/localizer/tests/test_swarm_plugin.py -q --no-cov` → 34
-passed; `mypy packages/localizer/src/localizer/plugins/swarm/loader.py` → "Success: no issues
-found". Read the full function, rule table, and all 16 tests. Traced `"Portland Pizza Co."` by
-hand: lower-cased, no transit rule matches (no bare `"port"` rule present), falls through to the
-`"pizza"` rule → returns `"Pizza"` — non-overlap constraint holds. Every Test Guidance item
-(airport, train/metro station, pizza, coffee, bar/pub, restaurant, no-match fallback, false-positive
-port/pizza guard, case-insensitivity, empty-string, punctuation-only) has a corresponding test.
-Confirmed `fetch_records()` (lines 267-271) is untouched, correctly scoping the wiring to Subtask 2.
-Function is pure, typed, Google-style docstring, PEP 8-compliant, uses only synthetic venue names —
-no personal data. Simplest implementation that satisfies the contract; no dead code or premature
-abstraction. Deliberate omissions of generic substrings (bare `"bar"`, `"food"`, `"wine"`, `"dessert"`)
-are sound anti-false-positive choices, not gaps — plan only required representative bucket coverage.
-No issues found.
+Owner: APPROVED — Independently read the full implementation (`analysis_utils.py:2136-2245`) and
+the 10 new tests in `tests/test_deep_cache.py`. Verified by direct trace: `get_life_chapters_cache_key`'s
+precedence (`base = repr(broker_identity)` when set, else `f"{get_cache_key(*legacy_config)}|
+{legacy_config!r}"`, else `"none"`, then combined with an `assumptions_hash` via a second md5) matches
+every acceptance criterion, including the broker-precedence test (changing `legacy_config` alone
+cannot affect `base` when `broker_identity is not None`). Confirmed `build_life_chapters()`'s own
+docstring lists `start`/`end` as the only `pd.Timestamp` fields on a chapter (all other fields are
+str/int/list), so `load_life_chapters_cache`'s rehydration of exactly those two fields (plus every
+`trip_periods` pair) is complete, not partial. `_load_deep_cache`'s existing `FileNotFoundError`/
+`json.JSONDecodeError` handling is reused unchanged for missing/corrupt files. Independently re-ran
+the scoped suite (`pytest tests/test_deep_cache.py -q --no-cov` → 31 passed), `ruff check`, and
+`mypy` — all clean. Test Guidance fully covered: determinism, assumptions-sensitivity, legacy-config-
+sensitivity, broker-precedence, sentinel-path, Timestamp round-trip with a mixed residency/trip
+fixture, stale-key miss, missing-path miss, corrupt-JSON miss. The flagged `repr(legacy_config)`
+deviation is sound for the reasons the code reviewer already gave; independently confirmed no
+alternative reading of the plan text is violated and no security/behavior regression results. Simple,
+well-scoped, no dead code, no premature abstraction. Approved as-is.
 
 ---
 
-### Subtask 2 — Wire the heuristic into `SwarmPlugin.fetch_records()`
+### Subtask 2 — Wire the disk cache into `render_life_in_chapters()`
 
 **Status**: APPROVED
 
-**PR Group**: venue-category-heuristics
+**PR Group**: life-chapters-disk-cache
 
 **Depends On**: 1
 
-**Description**:
-In `fetch_records()` (`packages/localizer/src/localizer/plugins/swarm/loader.py`, ~lines
-165-169), call `_infer_place_type_from_name(place_name)` **only** when `venue.get("categories")`
-is empty/missing, and use its result as `place_type`. When `categories` is non-empty, behavior is
-completely unchanged (`place_type = categories[0].get("name", "")`, exactly as today) — this is a
-strict additive fallback, not a replacement of existing category-derived classification.
-
-**Acceptance Criteria**:
-- [ ] A venue with a non-empty `categories` array behaves exactly as before (existing test
-  `test_fetch_records_place_type_from_category` continues to pass unchanged — no regression).
-- [ ] A venue with `categories: []` (or the key missing) and a heuristic-matching `name` (e.g.
-  "O'Hare International Airport") yields a record whose `place_type` is non-empty and contains
-  the expected keyword.
-- [ ] A venue with `categories: []` and a non-matching `name` (e.g. "Generic City Museum") yields
-  a record whose `place_type` is exactly `""` — identical to current (pre-fix) behavior, proving
-  no regression for the no-match case.
-- [ ] The fallback applies identically regardless of which documented export wrapper format the
-  file uses (`{"items": [...]}` vs `{"checkins": {"items": [...]}}` vs bare list) — the loader
-  already normalizes to a single `items` iteration before per-checkin processing, so this proves
-  the fallback isn't wrapper-format-dependent.
-
-**Files to Touch**:
-- `packages/localizer/src/localizer/plugins/swarm/loader.py`
-- `packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py` (new — kept disjoint from
-  Subtask 1's `test_swarm_plugin.py` so the parallel test-ahead batch has no shared-file writer
-  conflict; this file imports and reuses the existing `_make_checkin()` / `_write_checkins_json()`
-  helpers from `test_swarm_plugin.py` rather than duplicating them)
-
-**Test Guidance**:
-- Import/reuse the existing `_make_checkin()` / `_write_checkins_json()` helpers from
-  `test_swarm_plugin.py`; extend `_make_checkin()` (or add a sibling helper, defined in the new
-  file if the shared helper's signature can't be changed without touching Subtask 1's file) to
-  support constructing a checkin with an empty `categories` list, since the current helper always
-  populates one category.
-- Explicitly re-run/keep the existing category-present tests (e.g.
-  `test_fetch_records_place_type_from_category` in `test_swarm_plugin.py`) untouched to prove no
-  regression — do not weaken or delete them.
-- Add a case where `categories` key is entirely absent from the venue dict (not just an empty
-  list), matching real-world export variance.
-- Add at least one case per wrapper format (`{"items": [...]}`, `{"checkins": {"items": [...]}}`)
-  with an empty-categories, heuristic-eligible venue, to prove the fallback is wrapper-agnostic.
-- Add the combined edge case of empty/missing `categories` **and** an empty (or purely
-  punctuation) venue `name` at the `fetch_records()` integration level — assert the resulting
-  `place_type` is exactly `""` and `fetch_records()` does not raise (Subtask 1 already covers
-  empty-string input at the unit level directly against `_infer_place_type_from_name`; this proves
-  the same guarantee holds through the full wiring).
-- All venue names must be synthetic/generic, per CLAUDE.md Section 3.
-
-**Test Files**:
-- `packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py` (new, disjoint from Subtask
-  1's file — confirmed via `pytest --collect-only` across both swarm test files: 44 tests
-  collected, no conflicts) — 10 tests: empty-categories heuristic match (airport), missing-key
-  variant (pizza), both wrapper formats (`{"items": [...]}` and `{"checkins": {"items": [...]}}`)
-  with empty-categories heuristic-eligible venues, wiring-contract tests asserting
-  `_infer_place_type_from_name` is actually called when categories is empty/missing (mocked with
-  `create=True` so this file has no hard dependency on Subtask 1's function existing yet), a
-  no-match-flows-through-as-empty-string case, and 3 parametrized combined-edge-case tests (empty
-  categories + blank/whitespace/punctuation-only name must not raise). Note: AC1 (non-empty
-  categories unchanged) is deliberately not re-tested here — already covered by the pre-existing
-  `test_fetch_records_place_type_from_category` in `test_swarm_plugin.py`, which the coder must
-  keep passing unmodified. RED-confirmed: 10 failed, 0 passed, 0 errored (clean AssertionErrors,
-  no import errors).
-
-**Implementation Notes**:
-In `fetch_records()` (`packages/localizer/src/localizer/plugins/swarm/loader.py`), replaced the
-always-`""` fallback with a call to `_infer_place_type_from_name(place_name)`, invoked only in the
-`else` branch of `if categories: ... else: ...` (i.e. only when `venue.get("categories")` is
-empty or missing). When `categories` is non-empty, the line
-`place_type = categories[0].get("name", "")` is byte-for-byte unchanged from before — same branch,
-same expression, just now paired with an `else` instead of leaving `place_type` at a pre-set `""`.
-No other lines in `fetch_records()` were touched (wrapper-format normalization, timestamp
-handling, lat/lng handling all untouched), so the wrapper-agnostic behavior required by AC4 falls
-out for free — the heuristic call sits after per-checkin normalization is already complete.
-
-No changes needed to `_infer_place_type_from_name()` or `_NAME_HEURISTIC_RULES` themselves
-(Subtask 1's code was used as-is). No files beyond the two listed in Files to Touch were touched.
-
-**Verification**:
-- `ruff check --fix packages/localizer/src/localizer/plugins/swarm/loader.py` → "No issues found"
-- `ruff format packages/localizer/src/localizer/plugins/swarm/loader.py` → "All files formatted
-  correctly"
-- `pytest packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py
-  packages/localizer/tests/test_swarm_plugin.py -v --no-cov` → 44 passed (10 new wiring tests +
-  34 pre-existing from Subtask 1, including `test_fetch_records_place_type_from_category`
-  unmodified and passing — confirms AC1's no-regression requirement)
-- `mypy packages/localizer/src/localizer/plugins/swarm/loader.py` → "No issues found"
-
-**Review Notes**:
-Code Review: APPROVED — checks clean. `ruff check` on loader.py → "No issues found"; `ruff format
---check` → "1 file already formatted"; `mypy` → "No issues found". Ran
-`pytest packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py
-packages/localizer/tests/test_swarm_plugin.py -v --no-cov` → 44 passed, 0 failed — confirmed
-`test_fetch_records_place_type_from_category` passed unmodified (AC1, no regression). Read the
-full diff: in `fetch_records()` the non-empty-categories branch
-(`place_type = categories[0].get("name", "")`) is byte-for-byte unchanged, only now paired with an
-`else: place_type = _infer_place_type_from_name(place_name)` — confirms the heuristic is called
-only when `categories` is empty/missing, with `place_name` as the sole argument (verified directly
-and via the mock-based wiring-contract tests asserting `mock_infer.assert_called_once_with(...)`).
-Verified all 4 ACs against the diff, not just test mocking: AC1 (unchanged branch, passing
-pre-existing test), AC2 (real end-to-end test with "O'Hare International Airport" yields
-non-empty place_type containing "Airport"), AC3 (mocked-return-"" test proves fetch_records
-surfaces "" via the real call path, combined with Subtask 1's own coverage that the real function
-returns "" for non-matching names), AC4 (separate tests for both `{"items": [...]}` and
-`{"checkins": {"items": [...]}}` wrapper formats, both passing, proving the fallback sits after
-wrapper normalization). Reviewed the new test file for vacuousness — none found; mocks use
-`create=True` deliberately per Subtask 1/2 dependency ordering, not to hide missing coverage. No
-dead code, no secrets/credentials, no N+1/hot-path concerns (pure local JSON parsing). Confirmed
-`test_swarm_plugin.py` diff (lines 329+) is purely additive (Subtask 1's tests), no existing test
-bodies modified. No issues found.
-
-Owner: APPROVED — independently re-ran the gate: `pytest packages/localizer/tests/test_swarm_plugin.py
-packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py -q --no-cov` → 44 passed; `ruff check` on
-loader.py + test_swarm_plugin_heuristic_wiring.py → "No issues found"; `mypy loader.py` → "No issues
-found". Read the full diff: the non-empty-categories branch
-(`place_type = categories[0].get("name", "")`) is byte-for-byte unchanged, now paired with
-`else: place_type = _infer_place_type_from_name(place_name)`, called only when `categories` is
-empty/missing (`venue.get("categories", [])` defaults to `[]`) — a strict additive fallback, no
-regression risk. Verified all 4 ACs directly against the diff and tests: AC1 (unchanged branch,
-pre-existing `test_fetch_records_place_type_from_category` passes unmodified), AC2 (real
-unmocked airport test yields non-empty place_type containing "Airport"), AC3 (mocked
-wiring-contract test proves fetch_records() genuinely calls the heuristic and surfaces its `""`
-return rather than silently defaulting — a real unmocked call couldn't distinguish those two
-cases, so mocking here is deliberate test design, not a coverage gap, especially combined with
-Subtask 1's direct unit coverage of blank/punctuation input against the real function), AC4
-(both `{"items": [...]}` and `{"checkins": {"items": [...]}}` wrapper formats tested and passing,
-proving the fallback sits after wrapper normalization). Test Guidance fully covered: reused
-helpers, missing-key vs. empty-list variants, both wrapper formats, combined blank-name edge
-case, existing category-present test left untouched. No dead code, simplest possible change
-(one `else` branch). No issues found.
-
----
-
-### Subtask 3 — End-to-end integration test proving dining/transit features populate, plus docs note
-
-**Status**: APPROVED
-
-**PR Group**: venue-category-heuristics
-
-**Depends On**: 1, 2
+**Orchestrator note (post-NEEDS_REVISION fix)**: the owner's sole blocking finding was that
+`tests/test_deep_cache.py` (Subtask 1's test file) wasn't `ruff format`-clean — Subtask 1's coder/
+reviewer/owner had scoped their `ruff format --check` runs to `analysis_utils.py` only, missing the
+test file they also wrote. Fixed directly by the orchestrator (trivial, mechanical, no design
+decision — same trivial-change carve-out used elsewhere in this repo's AGENTS.md workflow): ran
+`ruff format tests/test_deep_cache.py` (1 file reformatted), then re-verified repo-wide:
+`ruff format --check .` → 163 files already formatted; `ruff check .` → all checks passed; `mypy`
+→ no issues in 18 source files; `pytest tests/test_life_in_chapters.py tests/test_deep_cache.py -v
+--no-cov` → **90 passed**, 0 failed. No test or production logic changed — formatting only. Subtask
+2's substance (already reviewed and approved by both the code reviewer and the owner) is otherwise
+unchanged. Status set to `APPROVED`; both subtasks in PR Group `life-chapters-disk-cache` are now
+APPROVED.
 
 **Description**:
-Add a new integration test file (`tests/test_venue_category_heuristic_integration.py`, root
-`tests/`, alongside other tests that already cross-import from the `localizer` package — e.g.
-`tests/test_localizer_broker.py`) that exercises the **full previously-broken pipeline**:
-`SwarmPlugin.fetch_records()` (synthetic empty-`categories` venues) → a DataFrame shaped like
-`core/localizer_frames.py::places_to_swarm_frame()`'s output → `analysis_utils.get_transit_days()`
-and `analysis_utils.get_dining_soundtrack_data()`. Assert both now return non-empty results for
-synthetic data that would have produced empty results before this fix (i.e., with `place_type`
-forced to `""`, matching the pre-fix behavior). Also add a short documentation note (in
-`packages/localizer/README.md`'s "places layer" section) describing the name-based fallback and
-its known limitation (approximate, name-pattern-based — real Foursquare category data, when
-present, is always preferred and unaffected).
+In `pages/life_in_chapters.py::render_life_in_chapters()`, extend the existing session-state-guarded
+block (lines 548-561) so the disk cache sits **behind** the cheap in-session `_lic_cache_key` guard
+from #91 (no added disk I/O on carousel clicks or any rerun where `_lic_key` is unchanged) but
+**in front of** the expensive `build_life_chapters()` / `detect_trip_periods()` calls:
+
+1. Resolve `broker_identity = st.session_state.get("_loaded_store_identity")` and `legacy_config =
+   st.session_state.get("_loaded_config")`.
+2. Compute `cache_key = get_life_chapters_cache_key(broker_identity, legacy_config,
+   merged_assumptions)`.
+3. Only when the existing `_lic_cache_key` check misses (i.e. exactly the same branch that
+   currently always recomputes):
+   a. Try `load_life_chapters_cache(cache_key)`. If it returns a non-`None` `(chapters, trip_periods)`
+      pair, use those directly — **skip** `build_life_chapters()` and `detect_trip_periods()`
+      entirely — then still compute `df_labeled = label_listening_context(df, trip_periods)` (cheap,
+      always recomputed; see Task Overview for why).
+   b. If it returns `None` (cache miss), compute `chapters`, `trip_periods`, `df_labeled` exactly as
+      today, then call `save_life_chapters_cache(cache_key, chapters, trip_periods)` wrapped in a
+      broad `try/except` so a disk-write failure (permissions, full disk) cannot prevent the
+      already-successfully-computed page from rendering.
+   c. Store `chapters`, `trip_periods`, `df_labeled` into `st.session_state` exactly as today (no
+      change to the downstream rendering code below this block).
+
+No new `st.columns()` calls are introduced by this subtask — this is pure data-plumbing ahead of the
+existing render logic, so no widget mock `side_effect` lists need updating.
 
 **Acceptance Criteria**:
-- [ ] A synthetic fixture built via `SwarmPlugin.fetch_records()` with empty-`categories`
-  checkins for an airport-style venue and a restaurant-style venue, converted into a `swarm_df`
-  matching `places_to_swarm_frame()`'s column shape, produces a non-empty result from
-  `get_transit_days(swarm_df)`.
-- [ ] The same fixture's restaurant-style checkin, combined with a small synthetic `lastfm_df`
-  containing listens within the dining time window, produces a non-empty result from
-  `get_dining_soundtrack_data(swarm_df, lastfm_df)` containing the expected bucket key (e.g.
-  `"Restaurants"`).
-- [ ] A control case using the same fixture but with `place_type`/`venue_category` forced to `""`
-  (simulating pre-fix behavior) demonstrates both functions return empty results — documenting
-  the before/after contrast explicitly rather than only asserting the fixed behavior.
-- [ ] `packages/localizer/README.md` documents the name-based fallback and its approximation
-  limitation in the existing "places layer" section (no new doc file created).
+- [ ] Session-state cache miss + matching disk cache present: `build_life_chapters` and
+  `detect_trip_periods` are NOT called (mocked, asserted via `.called is False`); `st.session_state`
+  ends up populated with the disk-cached `chapters`/`trip_periods`; `label_listening_context` IS
+  still called once with those `trip_periods`.
+- [ ] Session-state cache miss + no matching disk cache (`load_life_chapters_cache` returns `None`):
+  `build_life_chapters` and `detect_trip_periods` ARE called (existing behavior, unchanged), and
+  `save_life_chapters_cache` is called exactly once afterward with the freshly computed values and
+  the same `cache_key` a subsequent `load_life_chapters_cache` call would be given.
+- [ ] A second `render_life_in_chapters()` call in the same session where `st.session_state
+  ["_lic_cache_key"]` already matches `_lic_key` (the #91 guard) calls NEITHER
+  `load_life_chapters_cache` NOR `build_life_chapters`/`detect_trip_periods` NOR
+  `save_life_chapters_cache` — proving the disk-cache layer adds zero overhead to the already-fast
+  carousel-click path (no regression to #91).
+- [ ] When `st.session_state["_loaded_store_identity"]` is set (broker mode), the `cache_key` passed
+  to `load_life_chapters_cache`/`save_life_chapters_cache` is derived from it, not from
+  `_loaded_config` — verified by mocking `get_life_chapters_cache_key` and inspecting call args
+  under both a broker-mode and a legacy-mode session-state fixture.
+- [ ] If `save_life_chapters_cache` raises an exception, `render_life_in_chapters()` still completes
+  without raising and still renders the in-memory-computed chapters (disk-write failure is
+  non-fatal).
 
 **Files to Touch**:
-- `tests/test_venue_category_heuristic_integration.py` (new)
-- `packages/localizer/README.md`
+- `pages/life_in_chapters.py`
+- `tests/test_life_in_chapters.py` (existing file — established home for `render_life_in_chapters()`
+  integration tests; append new test methods to `TestRenderLifeInChapters`, reusing its existing
+  `_make_full_df()` / `_make_assumptions()` fixtures and mocking conventions — plain-dict
+  `patch("streamlit.session_state", {...})`, `_columns_side_effect` helper, expander/container
+  context-manager mocks — do not modify existing passing tests)
 
 **Test Guidance**:
-- Build the fixture using only synthetic venue names (reuse the style from Subtasks 1-2's
-  fixtures — e.g. "O'Hare International Airport", "Joe's Pizza Place") — no real personal data.
-- Construct the intermediate `swarm_df` either by calling `places_to_swarm_frame()` directly on a
-  DataFrame shaped like `fetch_records()`'s output (preferred, since it exercises the real adapter
-  code path end-to-end) or by hand-building a DataFrame with the exact `SWARM_COLUMNS` shape if
-  wiring the two together proves awkward in a unit test — prefer the former for genuine
-  end-to-end coverage.
-- For the dining assertion, place at least one synthetic Last.fm listen timestamp within the
-  existing `_DINING_WINDOW_MINUTES` (30 min) window of the restaurant checkin's timestamp, per
-  `get_dining_soundtrack_data()`'s documented windowing behavior.
-- For the "before" control case, do not re-derive `place_type` from the heuristic — explicitly
-  construct it as `""` to simulate the documented pre-fix bug, then assert both downstream
-  functions return empty (`set()` / `{}`) on that input, confirming the contrast is real and not
-  incidental.
-- This subtask adds no new production code — it is test-and-docs only, so no risk-domain-specific
-  guidance (concurrency/network/DB/etc.) applies here.
+- Reuse the existing `TestRenderLifeInChapters` fixtures and mocking style already in the file
+  (see `test_renders_chapters_with_data` ~line 345) rather than inventing new ones.
+- Cover both broker-mode (`_loaded_store_identity` set, `_loaded_config` absent or irrelevant) and
+  legacy-mode (`_loaded_store_identity` absent, `_loaded_config` a 4-tuple) session-state fixtures.
+- Cover the disk-cache-hit path (mock `pages.life_in_chapters.load_life_chapters_cache` to return a
+  synthetic `(chapters, trip_periods)` pair) and assert `build_life_chapters`/`detect_trip_periods`
+  are not called — this is the CI-safe proxy for "the cache makes cold start fast" (see Task
+  Overview's rationale for avoiding wall-clock timing assertions).
+- Cover the disk-cache-miss path (mock `load_life_chapters_cache` to return `None`) and assert the
+  existing compute-and-store behavior is unchanged, plus the new `save_life_chapters_cache` call.
+- Cover the "session cache already warm" path (pre-seed `st.session_state["_lic_cache_key"]` to
+  match the freshly computed `_lic_key` before calling `render_life_in_chapters()`) and assert zero
+  calls to any of the four new/existing expensive/disk functions — this is the regression guard for
+  #91's carousel-click behavior.
+- Cover the disk-write-failure resilience case: mock `save_life_chapters_cache` to raise, assert
+  `render_life_in_chapters()` does not raise and `mock_header`/`mock_metric` (or equivalent) still
+  fire, proving the page still rendered.
+- All fixture data must be synthetic, per CLAUDE.md Section 3 and the existing file's convention.
 
 **Test Files**:
-- `tests/test_venue_category_heuristic_integration.py` (new) — 6 tests:
-  `test_transit_days_populate_after_fix`, `test_dining_soundtrack_data_populates_after_fix`,
-  `test_dining_soundtrack_data_top_artists_include_synthetic_listen` (all RED — exercise the real
-  `SwarmPlugin.fetch_records()` → `places_to_swarm_frame()` → `get_transit_days()`/
-  `get_dining_soundtrack_data()` pipeline with synthetic empty-categories venues, e.g. an
-  O'Hare-style airport checkin and a "Corner City Diner" checkin with a Last.fm listen inside the
-  dining window); `test_transit_days_empty_before_fix_control` and
-  `test_dining_soundtrack_data_empty_before_fix_control` (both pass now by design — the explicit
-  before/after control, with `place_type` forced to `""`); `test_readme_documents_name_based_fallback_limitation`
-  (RED — asserts `packages/localizer/README.md` mentions the name-based fallback and its
-  approximation limitation via a durable keyword check, not a pinned sentence). RED-confirmed: 4
-  failed (genuine assertion failures — all imports resolved cleanly since the target module
-  already exists, just not yet wired with the heuristic), 2 passed (the intentional controls).
+- `tests/test_life_in_chapters.py` — 6 new tests appended to `TestRenderLifeInChapters` (existing
+  53 tests untouched): `test_disk_cache_hit_skips_build_and_detect` (AC1),
+  `test_disk_cache_miss_computes_and_saves` (AC2),
+  `test_disk_cache_layer_adds_no_overhead_when_session_cache_warm` (AC3 — #91 regression guard),
+  `test_cache_key_uses_broker_identity_when_present` / `test_cache_key_uses_legacy_config_when_no_broker_identity`
+  (AC4), `test_disk_write_failure_does_not_break_render` (AC5). All three new functions
+  (`get_life_chapters_cache_key`, `save_life_chapters_cache`, `load_life_chapters_cache`) mocked
+  with `create=True` so tests are genuine assertion-failure RED rather than import/attribute-error
+  RED (Subtask 1's implementation doesn't exist yet). RED-confirmed: 6 failed (clean
+  `AssertionError`s, e.g. "Expected '<function>' to have been called once. Called 0 times."), 0
+  errored; pre-existing 53 tests in the file still pass unaffected.
 
 **Implementation Notes**:
-This subtask required only test-verification (no new production code) plus one README
-doc addition, per its Files to Touch (`tests/test_venue_category_heuristic_integration.py`
-was already written by the tester; `packages/localizer/README.md` is the only file this
-coder edited).
+In `pages/life_in_chapters.py::render_life_in_chapters()`, extended the existing `_lic_cache_key`
+miss branch (lines 551-597) exactly per the plan:
+- Imported `get_life_chapters_cache_key`, `load_life_chapters_cache`, `save_life_chapters_cache`
+  from `analysis_utils` alongside the existing imports (alphabetized into the existing `from
+  analysis_utils import (...)` block).
+- Inside the miss branch: resolve `broker_identity = st.session_state.get("_loaded_store_identity")`
+  and `legacy_config = st.session_state.get("_loaded_config")`, compute `cache_key =
+  get_life_chapters_cache_key(broker_identity, legacy_config, merged_assumptions)`, then try
+  `load_life_chapters_cache(cache_key)`. On a hit, use the returned `(chapters, trip_periods)`
+  directly (skip `build_life_chapters`/`detect_trip_periods`) and still compute `df_labeled =
+  label_listening_context(df, trip_periods)`. On a miss, compute `chapters`/`trip_periods`/
+  `df_labeled` exactly as before, then call `save_life_chapters_cache(cache_key, chapters,
+  trip_periods)` wrapped in `try/except Exception: pass` (annotated `# noqa: BLE001, S110` with a
+  comment, matching the established broad-except-for-resilience convention already used elsewhere
+  in this codebase, e.g. `pages/geo_explorer.py:233`, `pages/places.py:86`). Session-state storage
+  (`_lic_cache_key`/`_lic_chapters`/`_lic_trip_periods`/`_lic_df_labeled`) and all downstream
+  rendering code are unchanged.
 
-Ran the pre-written `tests/test_venue_category_heuristic_integration.py` first, before
-making any change: 5 of 6 tests already passed (`test_transit_days_populate_after_fix`,
-`test_dining_soundtrack_data_populates_after_fix`,
-`test_dining_soundtrack_data_top_artists_include_synthetic_listen`, plus the two
-before/after control tests) — confirming Subtasks 1+2's merged heuristic + wiring already
-make the real `SwarmPlugin.fetch_records()` -> `places_to_swarm_frame()` ->
-`get_transit_days()` / `get_dining_soundtrack_data()` pipeline work end-to-end with no
-further production-code changes needed. Only `test_readme_documents_name_based_fallback_limitation`
-was RED, failing because the README doc note didn't exist yet.
+One deviation from the literal plan text, required to keep the pre-existing test suite green:
+`get_life_chapters_cache_key`'s legacy-mode branch (Subtask 1, `analysis_utils.py`) delegates to
+`get_cache_key(*legacy_config)`, which calls `os.path.exists()` on the first tuple element and
+raises `TypeError` if that element is `None` (not a valid path type). Several *pre-existing*
+tests in `TestRenderLifeInChapters` (already-passing before this subtask, not written by this
+subtask's tester) set `session_state["_loaded_config"] = (None, None, None)` — a 3-element
+placeholder tuple that was previously only ever indexed (`loaded_config[2]`), never passed to
+`get_cache_key`. Passing it through unchanged would crash `render_life_in_chapters()` for those
+pre-existing fixtures (and for 4 of the 6 new Subtask-2 tests, which reuse the same placeholder).
+Per scope, `analysis_utils.py` (Subtask 1, already `APPROVED`) could not be touched to fix this
+there, so the fix lives entirely in `pages/life_in_chapters.py`: before calling
+`get_life_chapters_cache_key`, `legacy_config` is sanitized — only passed through if it is a
+tuple of exactly 4 `str` elements (the documented `_loaded_config` shape per
+`components/sidebar.py`'s docstring, always true in real usage); anything else (missing, wrong
+length, non-string elements) is treated as `None` (the function's existing "no legacy config"
+sentinel path), which is deterministic and crash-free. This does not change behavior for any real
+session (real `_loaded_config` is always a well-formed 4-string tuple) and does not affect the
+`test_cache_key_uses_legacy_config_when_no_broker_identity` acceptance test, which uses a
+well-formed 4-string tuple and passes through unchanged.
 
-Added a new paragraph to `packages/localizer/README.md`'s existing "### The places layer
-and location assumptions" section (after the existing "This means:" bullet list, no new
-section/file created) titled "Name-based `place_type` fallback (Swarm/Foursquare)"
-describing: (1) the real-world bug (empty `categories` on every venue breaking
-category-dependent features), (2) that `SwarmPlugin.fetch_records()` now falls back to a
-name-based heuristic (with example keywords: airport, pizza, metro station, coffee) when
-`categories` is empty/missing, (3) the explicit limitation that this is an approximation
-used only as a fallback, and (4) that real Foursquare category data, when present, is
-always preferred and completely unaffected. This satisfies the test's loose keyword
-checks (`"name"` + `"fallback"`/`"heuristic"`, and `"approximat"`/`"limitation"`) without
-pinning exact wording.
+No files touched beyond the plan's `Files to Touch`. `analysis_utils.py` and
+`tests/test_deep_cache.py` untouched.
 
-No changes to `loader.py`, `test_swarm_plugin.py`, or
-`test_swarm_plugin_heuristic_wiring.py` — untouched, per the coder's scope boundary for
-this subtask.
-
-**Verification**:
-- `pytest tests/test_venue_category_heuristic_integration.py -v --no-cov` (before README
-  edit) → 5 passed, 1 failed (`test_readme_documents_name_based_fallback_limitation`)
-- `ruff check --fix .` (repo-wide) → "No issues found"
-- `ruff format .` (repo-wide) → "All files formatted correctly" (reformatted whitespace in
-  the untracked, tester-authored `tests/test_venue_category_heuristic_integration.py`; no
-  content/assertion changes, confirmed by full re-run below)
-- `pytest tests/test_venue_category_heuristic_integration.py -v --no-cov` (after README
-  edit) → 6 passed
-- Scoped set: `pytest tests/test_venue_category_heuristic_integration.py
-  packages/localizer/tests/test_swarm_plugin.py
-  packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py -v --no-cov` → 50 passed
-  (6 + 34 + 10, no regressions)
-- `ruff check packages/localizer/README.md tests/test_venue_category_heuristic_integration.py`
-  → "No issues found"; `ruff format --check tests/test_venue_category_heuristic_integration.py`
-  → "1 file already formatted"
+Verification:
+- `pytest tests/test_life_in_chapters.py -v --no-cov` → 59 passed, 0 failed (53 pre-existing + 6
+  new, no regression).
+- `pytest tests/test_deep_cache.py -v --no-cov` → 31 passed, 0 failed (Subtask 1's scoped tests,
+  confirming no regression from this subtask's changes).
+- `ruff check pages/life_in_chapters.py` → no issues found (after adding the `# noqa: BLE001,
+  S110` annotation to the disk-write-failure `except Exception: pass`, matching the codebase's
+  established convention for intentional broad-except resilience blocks). `ruff format
+  pages/life_in_chapters.py` → already formatted correctly.
+- `mypy pages/life_in_chapters.py` → no issues found.
 
 **Review Notes**:
-Code Review: APPROVED — checks clean. `ruff check .` (repo-wide) → "No issues found"; `ruff
-format --check .` → "163 files already formatted"; `mypy` → "No issues found"; `pytest
-tests/test_venue_category_heuristic_integration.py -v --no-cov` → 6 passed. Full scoped
-regression set for the PR group — `pytest packages/localizer/tests/test_swarm_plugin.py
-packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py
-tests/test_venue_category_heuristic_integration.py -v --no-cov` → 50 passed, 0 failed, no
-regressions across all 3 subtasks. Read the full test file: all 6 tests are genuine, not
-vacuous — `test_transit_days_populate_after_fix` /
-`test_dining_soundtrack_data_populates_after_fix` /
-`test_dining_soundtrack_data_top_artists_include_synthetic_listen` exercise the real
-`SwarmPlugin.fetch_records()` -> `places_to_swarm_frame()` -> `get_transit_days()`/
-`get_dining_soundtrack_data()` pipeline on synthetic empty-categories venues (airport +
-diner); the two control tests hand-construct `place_type=""` (not derived from the
-heuristic) to prove the before/after contrast is real, not incidental; the README test
-does a loose keyword check against the real file content. All 4 ACs verified against actual
-behavior: AC1 (transit_days non-empty via real pipeline), AC2 ("Restaurants" bucket with
-checkin_count/listen_count >= 1), AC3 (both functions return `set()`/`{}` on the forced-""
-control), AC4 (README paragraph present, read directly). README addition is accurate,
-correctly placed in the existing "### The places layer and location assumptions" section
-(single occurrence, immediately after the existing bullet list, before the `---`/##
-Installation break), not duplicative — no other mention of the name-based fallback exists
-elsewhere in the file. No dead code, no secrets/credentials, no N+1/hot-path concerns (test
-file only constructs small in-memory DataFrames). No issues found.
+Code Review: APPROVED — checks clean. `ruff check pages/life_in_chapters.py` → no issues;
+`ruff format --check pages/life_in_chapters.py` → already formatted; `mypy pages/life_in_chapters.py`
+→ no issues; `pytest tests/test_life_in_chapters.py tests/test_deep_cache.py -v --no-cov` → 90
+passed (59 + 31), 0 failed. Manual diff review found no dead code, no secrets, no N+1/hot-path
+issues, and the new `try/except Exception: pass` around `save_life_chapters_cache` is narrowly
+scoped to only that call (annotated `# noqa: BLE001, S110`), matching the codebase's existing
+broad-except-for-resilience convention — it does not swallow errors anywhere else in the block.
 
-Owner: APPROVED — independently re-ran the full scoped set: `pytest
-packages/localizer/tests/test_swarm_plugin.py
-packages/localizer/tests/test_swarm_plugin_heuristic_wiring.py
-tests/test_venue_category_heuristic_integration.py -q --no-cov` → 50 passed; `ruff check` on all
-touched files → "No issues found"; `mypy packages/localizer/src/localizer/plugins/swarm/loader.py`
-→ "No issues found". Read the full integration test file and the README diff. Confirmed
-`get_transit_days()`/`get_dining_soundtrack_data()` fixture design matches the real
-`analysis_utils.py` implementation (30-minute `_DINING_WINDOW_MINUTES`, `venue_category` column
-requirement) — the synthetic listen is placed 5 minutes after the dining checkin, safely inside
-the window. All 4 ACs verified against real behavior, not mocks: AC1 (`get_transit_days()`
-non-empty via the real `SwarmPlugin.fetch_records()` → `places_to_swarm_frame()` pipeline on an
-airport-style empty-categories checkin), AC2 ("Restaurants" bucket populated with
-checkin_count/listen_count >= 1 for a diner-style checkin), AC3 (both functions return
-`set()`/`{}` on the hand-constructed forced-`""` control, proving the before/after contrast is
-real, not incidental), AC4 (README paragraph at lines 49-59 of
-`packages/localizer/README.md`, correctly placed in the existing "places layer" section, accurate,
-documents the approximation/limitation as required). No dead code, no vacuous tests, no personal
-data in fixtures (all synthetic names).
+Assessed the flagged legacy-config sanitization guard specifically: (1) legitimate, not a
+root-cause dodge — traced `components/sidebar.py` and confirmed real `_loaded_config` is always
+written as a well-formed 4-string tuple (lines 342, 345, 363); the `(None, None, None)` shape only
+exists in pre-existing test fixtures (6+ call sites in `tests/test_life_in_chapters.py`, e.g. lines
+386/453/570/654/737/1034) that predate this subtask and were previously only ever index-accessed
+(`loaded_config[2]`), never passed to `get_cache_key`. This new code path is the first to pass
+`legacy_config` through to a function requiring a real path-like first element, so the guard is
+isolating test-only fixture debt from a genuinely new integration point, not masking a reachable
+production bug. Fixing it in already-`APPROVED` Subtask 1 was correctly out of scope, and the
+existing-test convention forbids modifying passing tests, so the page-layer guard was the right
+call. (2) No behavior change for real inputs — `test_cache_key_uses_legacy_config_when_no_broker_identity`
+uses a well-formed 4-string tuple and asserts (line 990) it passes through unchanged to
+`get_life_chapters_cache_key`. (3) Scope is appropriately narrow — a single `isinstance`/`len`/
+all-`str` check immediately before the `cache_key` computation, falling back to the function's
+existing `None` sentinel path; it touches nothing else and swallows no exceptions. No concerns
+found; no changes requested.
 
-**Holistic plan assessment (issue #93, all 3 subtasks now APPROVED)**: The issue's confirmed root
-cause — real Foursquare/Swarm exports ship an empty `categories` array on every venue, making
-`venue_category` always `""` and silently breaking both the Dining Soundtrack (#81) and In Transit
-(#83) features — is fixed via exactly the issue's own "Approach 2: name-based heuristics", with
-the tradeoff (lower accuracy, documented as an approximation) explicitly called out in the README
-per the issue's own framing. The fix is offline-first with zero new dependencies (CLAUDE.md
-Section 3 and the issue's explicit runtime constraint), correctly scoped to the active
-`packages/localizer` plugin system only, requires zero changes to the shared, well-tested
-`analysis_utils.py` classifiers (smallest blast radius), and is proven end-to-end by a real
-pipeline integration test plus an explicit before/after control contrast. Nothing from the issue's
-original ask is missing. Recommend the orchestrator append `Closes #93` to the PR-group commit
-message per the standard workflow rule.
+Owner: NEEDS_REVISION — Independently re-read the full diff of `pages/life_in_chapters.py`
+(lines 21-27, 551-596) and all 6 new tests in `tests/test_life_in_chapters.py` (lines 464-1067),
+plus re-verified Subtask 1's `analysis_utils.py` implementation (lines 2132-2246) against the
+`load_life_chapters_cache` acceptance criteria one more time.
 
-**All 3 subtasks in PR Group `venue-category-heuristics` are now APPROVED. Plan Status: COMPLETE.**
+**Correctness and test quality — sound, no changes requested to the wiring itself.** Traced every
+acceptance criterion against the code: the disk-cache load/hit/miss branch sits correctly behind
+the `#91` `_lic_cache_key` guard (line 554) and in front of `build_life_chapters`/
+`detect_trip_periods` (lines 574-590); `label_listening_context` is unconditionally recomputed on
+both the hit and miss paths (lines 577, 584), matching the Task Overview's documented rationale;
+the `save_life_chapters_cache` call is wrapped in a narrowly-scoped `try/except Exception: pass`
+that only covers that one call, satisfying AC5; `get_cache_key(*legacy_config)` genuinely raises
+`TypeError` on `os.path.exists(None)` when fed the pre-existing tests' `(None, None, None)`
+placeholder — confirmed by reading `get_cache_key`'s body (`analysis_utils.py:27-58`) and
+`components/sidebar.py:321,345` showing real `_loaded_config` is always a well-formed 4-string
+tuple — so the sanitization guard in `life_in_chapters.py` (lines 560-571) is a legitimate,
+narrowly-scoped fix isolating test-fixture debt at a new integration boundary, not a code smell or
+a root-cause dodge; I concur with the code reviewer's assessment. Tests are observable-behavior
+assertions (call counts, call args, session-state contents), would catch a real regression, and
+cover every item of Test Guidance (disk-hit, disk-miss, session-warm zero-overhead, broker vs.
+legacy precedence, write-failure resilience). `pytest tests/test_life_in_chapters.py
+tests/test_deep_cache.py -q --no-cov` → 90 passed. `mypy pages/life_in_chapters.py
+analysis_utils.py` → no issues.
+
+**Blocking issue — mandatory local quality gate is not clean.** `ruff format --check .` fails:
+`tests/test_deep_cache.py` (Subtask 1's test file) needs reformatting. Reproduced with `ruff
+format --diff tests/test_deep_cache.py`: `test_deterministic_same_inputs_same_key` (lines 572-577)
+wraps two `get_life_chapters_cache_key(...)` calls across 3 lines each; at this repo's configured
+`line-length = 100` (`pyproject.toml:46`), ruff wants each collapsed to one line (each fits in ~89
+chars). This is a real, reproducible, currently-failing check — not a style preference — and
+CLAUDE.md Section 7 states the local quality gate ("`ruff format --check .`" among the required
+commands) is "mandatory — no exceptions" before any commit or push, and that "a failing CI is a
+sign the gate was skipped locally." Root cause: Subtask 1's coder ran `ruff format
+analysis_utils.py` (scoped to just that one file, per its own Verification notes) rather than
+`ruff format .`, so the test file it also wrote was never run through the formatter; Subtask 1's
+reviewer likewise only checked `ruff format --check` on `analysis_utils.py`. Confirmed via `ruff
+format --check .` (whole-repo) that this is the *only* file affected — no other file in the diff
+has a formatting violation.
+
+**This is a mechanical, one-command fix** (`ruff format tests/test_deep_cache.py`, or `ruff format
+.`) — no new test-writing is needed, no behavior changes, and it does not touch the substance of
+either subtask's implementation. Because this PR group is about to close (this was the last
+subtask) and CLAUDE.md's gate is non-negotiable, I am not approving until the repo is fully
+`ruff format --check .`-clean. Status set back to `NEEDS_REVISION`; `current` left at 2.
+
+**Action for the next cycle**: run `ruff format tests/test_deep_cache.py` (or `ruff format .`
+repo-wide), re-run `ruff format --check .` to confirm zero files need reformatting, re-run the
+scoped test suite (`pytest tests/test_life_in_chapters.py tests/test_deep_cache.py -q --no-cov`)
+to confirm no regression, and update this subtask's Verification notes accordingly. No other
+changes are requested — the wiring, the tests, and the legacy-config guard are all approved as
+written.
 
 ---

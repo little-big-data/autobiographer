@@ -495,3 +495,224 @@ class TestDeepCacheConstants(unittest.TestCase):
             # Path should contain data/cache or data\cache
             normalized = const.replace("\\", "/")
             self.assertIn("data/cache", normalized, f"{const} not in data/cache dir")
+
+
+# ---------------------------------------------------------------------------
+# Subtask 1 (issue #92) — Life Chapters disk-cache key / save / load
+# ---------------------------------------------------------------------------
+
+
+def _make_synthetic_chapters() -> list[dict[str, Any]]:
+    """Build a synthetic chapters list mixing 'residency' and 'trip' kinds.
+
+    Mirrors the dict shape documented on build_life_chapters()'s docstring:
+    label, location, start, end, total_plays, top_artists, top_album,
+    discovery_count, exclusive_artists (plus lat/lng carried on raw periods).
+    All names are generic/synthetic per CLAUDE.md Section 3.
+    """
+    import pandas as pd
+
+    return [
+        {
+            "label": "Riverside",
+            "location": "Riverside, Freedonia",
+            "start": pd.Timestamp("2010-01-01"),
+            "end": pd.Timestamp("2011-06-30"),
+            "kind": "residency",
+            "total_plays": 4210,
+            "top_artists": ["Artist Alpha", "Artist Beta", "Artist Gamma"],
+            "top_album": "Album One",
+            "discovery_count": 37,
+            "exclusive_artists": ["Artist Alpha"],
+            "lat": 12.34,
+            "lng": 56.78,
+        },
+        {
+            "label": "Trip to Lakemont",
+            "location": "Lakemont, Freedonia",
+            "start": pd.Timestamp("2011-07-04"),
+            "end": pd.Timestamp("2011-07-11"),
+            "kind": "trip",
+            "total_plays": 88,
+            "top_artists": ["Artist Delta"],
+            "top_album": None,
+            "discovery_count": 2,
+            "exclusive_artists": [],
+            "lat": None,
+            "lng": None,
+        },
+    ]
+
+
+def _make_synthetic_trip_periods() -> list[tuple[Any, Any]]:
+    import pandas as pd
+
+    return [(pd.Timestamp("2011-07-04"), pd.Timestamp("2011-07-11"))]
+
+
+class TestLifeChaptersCacheConstant(unittest.TestCase):
+    """LIFE_CHAPTERS_CACHE constant should follow the same convention as the
+    existing DETECTED_TRIPS_CACHE / TRANSIT_DAYS_CACHE / DINING_CACHE constants."""
+
+    def test_life_chapters_cache_constant_shape(self) -> None:
+        from analysis_utils import LIFE_CHAPTERS_CACHE
+
+        self.assertIsInstance(LIFE_CHAPTERS_CACHE, str)
+        normalized = LIFE_CHAPTERS_CACHE.replace("\\", "/")
+        self.assertIn("data/cache", normalized)
+        self.assertTrue(normalized.endswith("life_chapters.json"))
+
+
+class TestGetLifeChaptersCacheKey(unittest.TestCase):
+    """Determinism and sensitivity of get_life_chapters_cache_key()."""
+
+    def test_deterministic_same_inputs_same_key(self) -> None:
+        from analysis_utils import get_life_chapters_cache_key
+
+        key1 = get_life_chapters_cache_key(None, ("a.csv", "", "assump.json", ""), {"trips": []})
+        key2 = get_life_chapters_cache_key(None, ("a.csv", "", "assump.json", ""), {"trips": []})
+        self.assertEqual(key1, key2)
+        self.assertIsInstance(key1, str)
+
+    def test_changing_merged_assumptions_changes_key(self) -> None:
+        from analysis_utils import get_life_chapters_cache_key
+
+        legacy_config = ("a.csv", "", "assump.json", "")
+        key1 = get_life_chapters_cache_key(None, legacy_config, {"trips": []})
+        key2 = get_life_chapters_cache_key(
+            None,
+            legacy_config,
+            {"trips": [{"city": "Newtown", "start": "2020-01-01", "end": "2020-01-05"}]},
+        )
+        self.assertNotEqual(key1, key2)
+
+    def test_changing_legacy_config_changes_key_when_broker_identity_none(self) -> None:
+        from analysis_utils import get_life_chapters_cache_key
+
+        merged_assumptions = {"trips": []}
+        key1 = get_life_chapters_cache_key(
+            None, ("a.csv", "", "assump.json", ""), merged_assumptions
+        )
+        key2 = get_life_chapters_cache_key(
+            None, ("b.csv", "otherdir", "other_assump.json", "timeline.csv"), merged_assumptions
+        )
+        self.assertNotEqual(key1, key2)
+
+    def test_broker_identity_takes_precedence_over_legacy_config(self) -> None:
+        """When both are provided, the key must be derived from broker_identity —
+        changing legacy_config alone must NOT change the resulting key."""
+        from analysis_utils import get_life_chapters_cache_key
+
+        broker_identity = ("store.duckdb", 1234567.0, "assump.json")
+        merged_assumptions = {"trips": []}
+        legacy_config_a = ("a.csv", "", "assump.json", "")
+        legacy_config_b = ("totally-different.csv", "otherdir", "other.json", "timeline.csv")
+
+        key1 = get_life_chapters_cache_key(broker_identity, legacy_config_a, merged_assumptions)
+        key2 = get_life_chapters_cache_key(broker_identity, legacy_config_b, merged_assumptions)
+        self.assertEqual(key1, key2)
+
+    def test_none_broker_and_none_legacy_uses_sentinel_and_is_deterministic(self) -> None:
+        from analysis_utils import get_life_chapters_cache_key
+
+        merged_assumptions = {"trips": []}
+        key1 = get_life_chapters_cache_key(None, None, merged_assumptions)
+        key2 = get_life_chapters_cache_key(None, None, merged_assumptions)
+        self.assertEqual(key1, key2)
+        self.assertIsInstance(key1, str)
+
+
+class TestLifeChaptersCacheSaveLoadRoundtrip(unittest.TestCase):
+    """save_life_chapters_cache() / load_life_chapters_cache() round-trip fidelity,
+    including pd.Timestamp reconstruction (JSON has no native Timestamp type)."""
+
+    def test_roundtrip_preserves_timestamps_and_other_fields(self) -> None:
+        import tempfile
+
+        import pandas as pd
+
+        from analysis_utils import load_life_chapters_cache, save_life_chapters_cache
+
+        chapters = _make_synthetic_chapters()
+        trip_periods = _make_synthetic_trip_periods()
+        cache_key = "roundtrip-key-A"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "life_chapters.json")
+            save_life_chapters_cache(cache_key, chapters, trip_periods, path=path)
+            result = load_life_chapters_cache(cache_key, path=path)
+
+        self.assertIsNotNone(result)
+        loaded_chapters, loaded_trip_periods = result
+
+        self.assertEqual(len(loaded_chapters), len(chapters))
+        for original, loaded in zip(chapters, loaded_chapters):
+            self.assertIsInstance(loaded["start"], pd.Timestamp)
+            self.assertIsInstance(loaded["end"], pd.Timestamp)
+            self.assertEqual(loaded["start"], original["start"])
+            self.assertEqual(loaded["end"], original["end"])
+            # All other fields must survive the round-trip unchanged.
+            for field in (
+                "label",
+                "location",
+                "kind",
+                "total_plays",
+                "top_artists",
+                "top_album",
+                "discovery_count",
+                "exclusive_artists",
+            ):
+                self.assertEqual(
+                    loaded[field], original[field], f"field {field!r} changed on round-trip"
+                )
+
+        self.assertEqual(len(loaded_trip_periods), len(trip_periods))
+        for (orig_start, orig_end), (loaded_start, loaded_end) in zip(
+            trip_periods, loaded_trip_periods
+        ):
+            self.assertIsInstance(loaded_start, pd.Timestamp)
+            self.assertIsInstance(loaded_end, pd.Timestamp)
+            self.assertEqual(loaded_start, orig_start)
+            self.assertEqual(loaded_end, orig_end)
+
+
+class TestLifeChaptersCacheStaleAndMissing(unittest.TestCase):
+    """Stale cache-key mismatch and missing/corrupt file handling — always a
+    forced miss (None), never a stale hit, matching _load_deep_cache's
+    existing missing/corrupt behavior."""
+
+    def test_mismatched_cache_key_is_treated_as_miss(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_life_chapters_cache, save_life_chapters_cache
+
+        chapters = _make_synthetic_chapters()
+        trip_periods = _make_synthetic_trip_periods()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "life_chapters.json")
+            save_life_chapters_cache("key-A", chapters, trip_periods, path=path)
+            result = load_life_chapters_cache("key-B", path=path)
+
+        self.assertIsNone(result)
+
+    def test_load_missing_path_returns_none(self) -> None:
+        from analysis_utils import load_life_chapters_cache
+
+        result = load_life_chapters_cache(
+            "any-key", path=os.path.join("nonexistent", "dir", "life_chapters.json")
+        )
+        self.assertIsNone(result)
+
+    def test_load_corrupt_json_returns_none(self) -> None:
+        import tempfile
+
+        from analysis_utils import load_life_chapters_cache
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "life_chapters.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("not json {")
+            result = load_life_chapters_cache("any-key", path=path)
+
+        self.assertIsNone(result)

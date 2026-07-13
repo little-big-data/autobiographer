@@ -2130,6 +2130,122 @@ def get_deep_analysis_status() -> dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Life Chapters disk cache (issue #92)
+# ---------------------------------------------------------------------------
+
+LIFE_CHAPTERS_CACHE: str = os.path.join("data", "cache", "life_chapters.json")
+
+
+def get_life_chapters_cache_key(
+    broker_identity: Optional[tuple[Any, ...]],
+    legacy_config: Optional[tuple[str, str, str, str]],
+    merged_assumptions: dict[str, Any],
+) -> str:
+    """Compute a deterministic disk-cache key for Life in Chapters.
+
+    Combines whichever data-loading identity is active this session
+    (broker-mode ``_loaded_store_identity`` takes precedence over
+    legacy-mode ``_loaded_config``) with a hash of ``merged_assumptions``
+    (which can change independently of either identity, e.g. after the user
+    rebuilds the Swarm Analysis Cache).
+
+    Args:
+        broker_identity: The broker-mode identity tuple (``store_path``,
+            ``store_mtime``, ``assumptions_path``), or None if broker mode
+            is not active this session.
+        legacy_config: The legacy-mode 4-tuple (``file_path``, ``swarm_dir``,
+            ``assumptions_path``, ``timeline_path``), or None if legacy mode
+            is not active this session.
+        merged_assumptions: The fully merged assumptions dict used to build
+            Life in Chapters (folds in detected-trips overrides, etc.).
+
+    Returns:
+        A deterministic hex digest suitable as a cache key.
+    """
+    if broker_identity is not None:
+        base = repr(broker_identity)
+    elif legacy_config is not None:
+        # Reuse the existing file-mtime-based cache key, but also fold in the
+        # raw config tuple itself so the key remains sensitive to config
+        # changes even when the referenced files don't exist on disk (e.g.
+        # in tests using synthetic paths, where get_cache_key() alone would
+        # collapse to its "none" sentinel for every non-existent path).
+        base = f"{get_cache_key(*legacy_config)}|{legacy_config!r}"
+    else:
+        base = "none"
+
+    assumptions_json = json.dumps(merged_assumptions, sort_keys=True, default=str)
+    assumptions_hash = hashlib.md5(  # noqa: S324
+        assumptions_json.encode(), usedforsecurity=False
+    ).hexdigest()
+
+    return hashlib.md5(  # noqa: S324
+        f"{base}|{assumptions_hash}".encode(), usedforsecurity=False
+    ).hexdigest()
+
+
+def save_life_chapters_cache(
+    cache_key: str,
+    chapters: list[dict[str, Any]],
+    trip_periods: list[tuple[pd.Timestamp, pd.Timestamp]],
+    path: str = LIFE_CHAPTERS_CACHE,
+) -> None:
+    """Persist Life in Chapters' precomputed ``chapters``/``trip_periods`` to disk.
+
+    Args:
+        cache_key: The key from :func:`get_life_chapters_cache_key`, stored
+            alongside the payload so a later load can detect staleness.
+        chapters: Output of :func:`build_life_chapters`.
+        trip_periods: Output of :func:`detect_trip_periods`.
+        path: Destination file path.
+    """
+    payload = {
+        "cache_key": cache_key,
+        "chapters": chapters,
+        "trip_periods": [[start, end] for start, end in trip_periods],
+    }
+    _save_deep_cache(payload, path)
+
+
+def load_life_chapters_cache(
+    cache_key: str, path: str = LIFE_CHAPTERS_CACHE
+) -> Optional[tuple[list[dict[str, Any]], list[tuple[pd.Timestamp, pd.Timestamp]]]]:
+    """Load Life in Chapters' precomputed ``chapters``/``trip_periods`` from disk.
+
+    Args:
+        cache_key: The key from :func:`get_life_chapters_cache_key`. If it
+            does not match the stored key, the cache is treated as stale and
+            this returns None (forced miss, never a stale hit).
+        path: Path to the JSON cache file.
+
+    Returns:
+        ``(chapters, trip_periods)`` with ``pd.Timestamp`` objects
+        reconstructed for every date field, or None if the file is missing,
+        corrupt, or stale.
+    """
+    raw = _load_deep_cache(path)
+    if raw is None or not isinstance(raw, dict):
+        return None
+    if raw.get("cache_key") != cache_key:
+        return None
+
+    chapters: list[dict[str, Any]] = []
+    for chapter in raw.get("chapters", []):
+        restored = dict(chapter)
+        if restored.get("start") is not None:
+            restored["start"] = pd.Timestamp(restored["start"])
+        if restored.get("end") is not None:
+            restored["end"] = pd.Timestamp(restored["end"])
+        chapters.append(restored)
+
+    trip_periods: list[tuple[pd.Timestamp, pd.Timestamp]] = [
+        (pd.Timestamp(start), pd.Timestamp(end)) for start, end in raw.get("trip_periods", [])
+    ]
+
+    return chapters, trip_periods
+
+
+# ---------------------------------------------------------------------------
 # Listening session detection
 # ---------------------------------------------------------------------------
 

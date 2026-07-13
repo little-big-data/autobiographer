@@ -461,6 +461,610 @@ class TestRenderLifeInChapters(unittest.TestCase):
         # st.info should be called because no chapters pass the filter
         mock_info.assert_called()
 
+    # ── Subtask 2 (issue #92): Life Chapters disk-cache wiring ──────────────
+
+    def _life_chapters_streamlit_mocks(
+        self,
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Build the columns/expander/container/slider mocks shared by these tests."""
+        expander_cm = MagicMock()
+        expander_cm.__enter__ = MagicMock(return_value=expander_cm)
+        expander_cm.__exit__ = MagicMock(return_value=False)
+
+        container_cm = MagicMock()
+        container_cm.__enter__ = MagicMock(return_value=container_cm)
+        container_cm.__exit__ = MagicMock(return_value=False)
+
+        col_mock = MagicMock()
+
+        def _columns_side_effect(spec: object) -> list[MagicMock]:
+            if isinstance(spec, int):
+                return [col_mock] * spec
+            if isinstance(spec, (list, tuple)):
+                return [col_mock] * len(spec)
+            return [col_mock, col_mock]
+
+        return expander_cm, container_cm, col_mock, _columns_side_effect
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_disk_cache_hit_skips_build_and_detect(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """A matching disk cache short-circuits build_life_chapters/detect_trip_periods.
+
+        Covers Subtask 2 AC 1: on a session-state miss, a disk-cache hit must be
+        used directly instead of recomputing, and label_listening_context must
+        still run once against the disk-cached trip_periods.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        disk_chapters = [
+            {
+                "label": "Trip to Berlin",
+                "location": "Berlin, Germany",
+                "start": pd.Timestamp("2021-01-01"),
+                "end": pd.Timestamp("2021-03-31"),
+                "kind": "trip",
+                "total_plays": 2,
+                "top_artists": ["Delta"],
+                "top_album": "Album Delta",
+                "discovery_count": 1,
+                "exclusive_artists": [],
+            }
+        ]
+        disk_trip_periods = [(pd.Timestamp("2021-01-01"), pd.Timestamp("2021-03-31"))]
+        synthetic_labeled_df = df.copy()
+        synthetic_labeled_df["context"] = "home"
+
+        # Distinct from disk_chapters/disk_trip_periods so that, if the old
+        # pre-Subtask-2 code path calls build_life_chapters/detect_trip_periods
+        # unconditionally (ignoring the disk cache), the render still completes
+        # cleanly on realistic data and the assert_not_called() calls below fail
+        # with a clear AssertionError rather than a downstream crash.
+        fallback_chapters = [
+            {
+                "label": "Reykjavik",
+                "location": "Reykjavik, Iceland",
+                "start": pd.Timestamp("2020-01-01"),
+                "end": pd.Timestamp("2020-12-31"),
+                "kind": "residency",
+                "total_plays": 3,
+                "top_artists": ["Alpha", "Beta", "Gamma"],
+                "top_album": "Album Alpha",
+                "discovery_count": 3,
+                "exclusive_artists": [],
+            }
+        ]
+        fallback_trip_periods: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+        session_state = {"df": df, "_loaded_config": (None, None, None)}
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters",
+                return_value=fallback_chapters,
+            ) as mock_build,
+            patch(
+                "pages.life_in_chapters.detect_trip_periods",
+                return_value=fallback_trip_periods,
+            ) as mock_detect,
+            patch(
+                "pages.life_in_chapters.label_listening_context",
+                return_value=synthetic_labeled_df,
+            ) as mock_label,
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=(disk_chapters, disk_trip_periods),
+            ) as mock_load,
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+            ) as mock_save,
+        ):
+            render_life_in_chapters()
+
+        mock_load.assert_called_once()
+        mock_build.assert_not_called()
+        mock_detect.assert_not_called()
+        mock_label.assert_called_once_with(df, disk_trip_periods)
+        mock_save.assert_not_called()
+        mock_header.assert_called_with("Life in Chapters")
+        self.assertEqual(session_state["_lic_chapters"], disk_chapters)
+        self.assertEqual(session_state["_lic_trip_periods"], disk_trip_periods)
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_disk_cache_miss_computes_and_saves(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """A disk-cache miss falls back to computing normally and writes the result.
+
+        Covers Subtask 2 AC 2: build_life_chapters/detect_trip_periods run exactly
+        as before, and save_life_chapters_cache is called exactly once with the
+        freshly computed chapters/trip_periods and the same cache_key that was
+        used for the (missed) load_life_chapters_cache call.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        session_state = {"df": df, "_loaded_config": (None, None, None)}
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters", wraps=build_life_chapters
+            ) as mock_build,
+            patch(
+                "pages.life_in_chapters.detect_trip_periods", wraps=detect_trip_periods
+            ) as mock_detect,
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=None,
+            ) as mock_load,
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+            ) as mock_save,
+        ):
+            render_life_in_chapters()
+
+        mock_load.assert_called_once()
+        mock_build.assert_called_once()
+        mock_detect.assert_called_once()
+        mock_save.assert_called_once()
+
+        load_cache_key = mock_load.call_args.args[0]
+        save_cache_key = mock_save.call_args.args[0]
+        self.assertEqual(load_cache_key, save_cache_key)
+
+        saved_chapters = mock_save.call_args.args[1]
+        saved_trip_periods = mock_save.call_args.args[2]
+        self.assertEqual(saved_chapters, session_state["_lic_chapters"])
+        self.assertEqual(saved_trip_periods, session_state["_lic_trip_periods"])
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_disk_cache_layer_adds_no_overhead_when_session_cache_warm(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """Once the #91 in-session guard is warm, the disk-cache layer adds zero calls.
+
+        Covers Subtask 2 AC 3 (regression guard): a second render_life_in_chapters()
+        call in the same session, where _lic_cache_key already matches _lic_key,
+        must call NEITHER load_life_chapters_cache NOR build_life_chapters/
+        detect_trip_periods NOR save_life_chapters_cache.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        session_state = {"df": df, "_loaded_config": (None, None, None)}
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters", wraps=build_life_chapters
+            ) as mock_build,
+            patch(
+                "pages.life_in_chapters.detect_trip_periods", wraps=detect_trip_periods
+            ) as mock_detect,
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=None,
+            ) as mock_load,
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+            ) as mock_save,
+        ):
+            # First call: cold — session-state guard misses, disk cache also
+            # misses, forcing the real compute-and-save path so `_lic_cache_key`
+            # ends up populated in session_state for the second call below.
+            render_life_in_chapters()
+
+            mock_load.assert_called_once()
+            mock_build.assert_called_once()
+            mock_detect.assert_called_once()
+            mock_save.assert_called_once()
+
+            mock_load.reset_mock()
+            mock_build.reset_mock()
+            mock_detect.reset_mock()
+            mock_save.reset_mock()
+
+            # Second call: the #91 session-state guard is now warm — the
+            # disk-cache layer must add zero additional calls of any kind.
+            render_life_in_chapters()
+
+        mock_load.assert_not_called()
+        mock_build.assert_not_called()
+        mock_detect.assert_not_called()
+        mock_save.assert_not_called()
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_cache_key_uses_broker_identity_when_present(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """In broker mode, get_life_chapters_cache_key is derived from broker_identity.
+
+        Covers Subtask 2 AC 4 (broker-mode fixture half): when
+        `_loaded_store_identity` is set, it is passed as the cache-key
+        function's broker_identity argument.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        disk_chapters = [
+            {
+                "label": "Trip to Berlin",
+                "location": "Berlin, Germany",
+                "start": pd.Timestamp("2021-01-01"),
+                "end": pd.Timestamp("2021-03-31"),
+                "kind": "trip",
+                "total_plays": 2,
+                "top_artists": ["Delta"],
+                "top_album": "Album Delta",
+                "discovery_count": 1,
+                "exclusive_artists": [],
+            }
+        ]
+        disk_trip_periods = [(pd.Timestamp("2021-01-01"), pd.Timestamp("2021-03-31"))]
+        synthetic_labeled_df = df.copy()
+        synthetic_labeled_df["context"] = "home"
+
+        broker_identity = ("store.duckdb", 123456.0, "assump.json")
+        session_state = {
+            "df": df,
+            "_loaded_store_identity": broker_identity,
+            "_loaded_config": ("", "", "assump.json", ""),
+        }
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters",
+                return_value=disk_chapters,
+            ),
+            patch(
+                "pages.life_in_chapters.detect_trip_periods",
+                return_value=disk_trip_periods,
+            ),
+            patch(
+                "pages.life_in_chapters.label_listening_context",
+                return_value=synthetic_labeled_df,
+            ),
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=None,
+            ),
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+            ),
+            patch(
+                "pages.life_in_chapters.get_life_chapters_cache_key",
+                create=True,
+                return_value="broker-derived-key",
+            ) as mock_get_key,
+        ):
+            render_life_in_chapters()
+
+        mock_get_key.assert_called_once()
+        self.assertEqual(mock_get_key.call_args.args[0], broker_identity)
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_cache_key_uses_legacy_config_when_no_broker_identity(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """In legacy mode, get_life_chapters_cache_key is derived from _loaded_config.
+
+        Covers Subtask 2 AC 4 (legacy-mode fixture half): when
+        `_loaded_store_identity` is absent, `None` is passed as broker_identity
+        and the `_loaded_config` 4-tuple is passed as legacy_config.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        disk_chapters = [
+            {
+                "label": "Trip to Berlin",
+                "location": "Berlin, Germany",
+                "start": pd.Timestamp("2021-01-01"),
+                "end": pd.Timestamp("2021-03-31"),
+                "kind": "trip",
+                "total_plays": 2,
+                "top_artists": ["Delta"],
+                "top_album": "Album Delta",
+                "discovery_count": 1,
+                "exclusive_artists": [],
+            }
+        ]
+        disk_trip_periods = [(pd.Timestamp("2021-01-01"), pd.Timestamp("2021-03-31"))]
+        synthetic_labeled_df = df.copy()
+        synthetic_labeled_df["context"] = "home"
+
+        legacy_config = ("file.csv", "swarm_dir", "assump.json", "timeline.csv")
+        session_state = {"df": df, "_loaded_config": legacy_config}
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters",
+                return_value=disk_chapters,
+            ),
+            patch(
+                "pages.life_in_chapters.detect_trip_periods",
+                return_value=disk_trip_periods,
+            ),
+            patch(
+                "pages.life_in_chapters.label_listening_context",
+                return_value=synthetic_labeled_df,
+            ),
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=None,
+            ),
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+            ),
+            patch(
+                "pages.life_in_chapters.get_life_chapters_cache_key",
+                create=True,
+                return_value="legacy-derived-key",
+            ) as mock_get_key,
+        ):
+            render_life_in_chapters()
+
+        mock_get_key.assert_called_once()
+        self.assertIsNone(mock_get_key.call_args.args[0])
+        self.assertEqual(mock_get_key.call_args.args[1], legacy_config)
+
+    @patch("streamlit.button")
+    @patch("streamlit.metric")
+    @patch("streamlit.columns")
+    @patch("streamlit.expander")
+    @patch("streamlit.header")
+    @patch("streamlit.caption")
+    @patch("streamlit.divider")
+    @patch("streamlit.markdown")
+    @patch("streamlit.subheader")
+    @patch("streamlit.container")
+    @patch("streamlit.slider")
+    def test_disk_write_failure_does_not_break_render(
+        self,
+        mock_slider: MagicMock,
+        mock_container: MagicMock,
+        mock_subheader: MagicMock,
+        mock_markdown: MagicMock,
+        mock_divider: MagicMock,
+        mock_caption: MagicMock,
+        mock_header: MagicMock,
+        mock_expander: MagicMock,
+        mock_columns: MagicMock,
+        mock_metric: MagicMock,
+        mock_button: MagicMock,
+    ) -> None:
+        """A save_life_chapters_cache failure must not prevent the page from rendering.
+
+        Covers Subtask 2 AC 5: if save_life_chapters_cache raises, the page still
+        completes (no exception propagates) and still renders the in-memory
+        computed chapters.
+        """
+        df = self._make_full_df()
+        assumptions = _make_assumptions(include_trips=True)
+
+        expander_cm, container_cm, col_mock, columns_side_effect = (
+            self._life_chapters_streamlit_mocks()
+        )
+        mock_expander.return_value = expander_cm
+        mock_container.return_value = container_cm
+        mock_columns.side_effect = columns_side_effect
+        mock_slider.return_value = 0
+
+        session_state = {"df": df, "_loaded_config": (None, None, None)}
+
+        with (
+            patch("streamlit.session_state", session_state),
+            patch("pages.life_in_chapters.load_assumptions", return_value=assumptions),
+            patch("pages.life_in_chapters.load_detected_trips_cache", return_value=[]),
+            patch("pages.life_in_chapters._render_home_vs_trip_summary"),
+            patch("pages.life_in_chapters._render_chapter_map"),
+            patch(
+                "pages.life_in_chapters.build_life_chapters", wraps=build_life_chapters
+            ) as mock_build,
+            patch(
+                "pages.life_in_chapters.detect_trip_periods", wraps=detect_trip_periods
+            ) as mock_detect,
+            patch(
+                "pages.life_in_chapters.load_life_chapters_cache",
+                create=True,
+                return_value=None,
+            ) as mock_load,
+            patch(
+                "pages.life_in_chapters.save_life_chapters_cache",
+                create=True,
+                side_effect=OSError("disk full"),
+            ) as mock_save,
+        ):
+            render_life_in_chapters()  # must not raise despite save failing
+
+        mock_load.assert_called_once()
+        mock_build.assert_called_once()
+        mock_detect.assert_called_once()
+        mock_save.assert_called_once()
+        mock_header.assert_called_with("Life in Chapters")
+        self.assertTrue(mock_metric.called)
+
 
 class TestDetectTripPeriods(unittest.TestCase):
     """Tests for detect_trip_periods."""
