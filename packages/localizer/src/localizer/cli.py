@@ -76,6 +76,48 @@ def _get_settings() -> LocalizerSettings:
     return LocalizerSettings()
 
 
+def _resolve_since_floor(store: Any, source_id: str, output_tables: list[Any]) -> int | None:
+    """Resolve the incremental-resume floor for a source's ``since`` cursor.
+
+    Prefers the newest already-committed record timestamp — across every
+    table the plugin declares in ``OUTPUT_TABLES`` — over
+    ``sync_state.last_synced_at``. This makes a resync (including resuming
+    an initial full-history load that was interrupted mid-write) pick up
+    from exactly what has actually landed in the store, regardless of
+    whether the interrupted run ever reached ``set_sync_state``: each
+    ``upsert_*`` batch commits its own transaction, so committed batches
+    survive a crash even when the final cursor write does not (see issue
+    #109).
+
+    For a dual-output plugin (e.g. Flickr, which writes both PLACES and
+    EVENTS), the floor is the *minimum* of each table's max timestamp, so
+    neither stream skips data the other table hasn't caught up to yet. If
+    any declared table has no committed rows at all, this falls back to
+    ``sync_state.last_synced_at`` (typically None, i.e. full history) so a
+    partially-started dual-output plugin still fetches everything for the
+    table that has nothing yet.
+
+    Args:
+        store: Open ``LocalizerStore``.
+        source_id: Plugin ID whose cursor is being resolved.
+        output_tables: The plugin's ``OUTPUT_TABLES`` list (may be empty).
+
+    Returns:
+        Unix timestamp floor to pass as ``since=``, or None for full history.
+    """
+    tables = output_tables or [None]
+    floors: list[int] = []
+    for table in tables:
+        table_name = table.value if table is not None else "events"
+        latest = store.get_latest_timestamp(source_id, table=table_name)
+        if latest is None:
+            state = store.get_sync_state(source_id)
+            return state.get("last_synced_at")  # type: ignore[no-any-return]
+        floors.append(latest)
+
+    return min(floors)
+
+
 # ---------------------------------------------------------------------------
 # Root group
 # ---------------------------------------------------------------------------
@@ -253,6 +295,14 @@ def export_cmd(fmt: str, table: str | None, since: int | None, output: str) -> N
     "--full", "full", is_flag=True, default=False, help="Ignore last cursor and fetch all records."
 )
 @click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Alias for --full: bypass the stored cursor and any resumable "
+    "committed-data floor, forcing a full rebuild.",
+)
+@click.option(
     "--dry-run", "dry_run", is_flag=True, default=False, help="Fetch but do not write to store."
 )
 @click.option(
@@ -273,6 +323,7 @@ def fetch_cmd(
     source: str,
     since: int | None,
     full: bool,
+    force: bool,
     dry_run: bool,
     set_dir: str | None,
     set_file: str | None,
@@ -286,6 +337,7 @@ def fetch_cmd(
       localizer fetch swarm --set-dir "G:/My Drive/Swarm Export"
       localizer fetch letterboxd --set-file "/path/to/diary.csv"
     """
+    full = full or force
     from localizer.plugins import REGISTRY, load_builtin_plugins  # noqa: PLC0415
     from localizer.store.db import LocalizerStore  # noqa: PLC0415
 
@@ -316,20 +368,19 @@ def fetch_cmd(
     plugin = plugin_cls()
 
     store_path = _get_store_path()
+    output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
 
-    # Determine since timestamp from sync state when not forced.
+    # Determine since timestamp from the resumable-sync floor when not forced.
     effective_since = since
     if not full and effective_since is None:
         with LocalizerStore(store_path) as store:
-            state = store.get_sync_state(source)
-            effective_since = state.get("last_synced_at")
+            effective_since = _resolve_since_floor(store, source, output_tables)
 
     import time  # noqa: PLC0415
 
     from rich.console import Console  # noqa: PLC0415
 
     console = Console(stderr=True)
-    output_tables = getattr(plugin_cls, "OUTPUT_TABLES", [])
     primary_table = output_tables[0] if output_tables else None
     secondary_table = output_tables[1] if len(output_tables) > 1 else None
     count = 0
@@ -404,7 +455,15 @@ def fetch_cmd(
 @click.option(
     "--dry-run", "dry_run", is_flag=True, default=False, help="Fetch but do not write to store."
 )
-def sync_cmd(since: int | None, dry_run: bool) -> None:
+@click.option(
+    "--force",
+    "force",
+    is_flag=True,
+    default=False,
+    help="Bypass the stored cursor and any resumable committed-data floor for "
+    "every plugin, forcing a full rebuild.",
+)
+def sync_cmd(since: int | None, dry_run: bool, force: bool) -> None:
     """Sync all registered plugins."""
     from rich.console import Console  # noqa: PLC0415
 
@@ -427,12 +486,11 @@ def sync_cmd(since: int | None, dry_run: bool) -> None:
         primary_table = output_tables[0] if output_tables else None
         secondary_table = output_tables[1] if len(output_tables) > 1 else None
 
-        # Determine effective since from sync state.
+        # Determine effective since from the resumable-sync floor, unless forced.
         effective_since = since
-        if effective_since is None and not dry_run:
+        if effective_since is None and not dry_run and not force:
             with LocalizerStore(store_path) as store:
-                state = store.get_sync_state(plugin_id)
-                effective_since = state.get("last_synced_at")
+                effective_since = _resolve_since_floor(store, plugin_id, output_tables)
         page_label: list[str] = [""]
 
         def _progress_cb(current: int, total: int, _pl: list[str] = page_label) -> None:

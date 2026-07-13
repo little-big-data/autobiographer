@@ -356,6 +356,41 @@ class LocalizerStore:
         return self._conn.execute(sql, params).df()
 
     # ------------------------------------------------------------------
+    # Resumable-sync support (issue #109)
+    # ------------------------------------------------------------------
+
+    _TIMESTAMP_TABLES = ("events", "places", "content")
+
+    def get_latest_timestamp(self, source_id: str, table: str = "events") -> int | None:
+        """Return the newest already-committed record timestamp for a source.
+
+        Used to resume an interrupted or incremental sync from exactly what
+        has actually landed in the store, instead of relying solely on
+        ``sync_state.last_synced_at`` — which is only written after a run
+        completes. A crash mid-write still leaves already-committed batches
+        intact (each ``upsert_*`` call commits its own transaction), so
+        re-querying the real data gives an accurate resume point even when
+        ``set_sync_state`` was never reached.
+
+        Args:
+            source_id: The plugin's source identifier.
+            table: Which table to query — one of "events", "places",
+                "content". Falls back to "events" for any other value.
+
+        Returns:
+            The max ``timestamp`` among rows matching ``source_id`` in
+            ``table``, or None if there are no such rows.
+        """
+        if table not in self._TIMESTAMP_TABLES:
+            table = "events"
+        assert self._conn is not None
+        sql = f"SELECT MAX(timestamp) FROM {table} WHERE source_id = ?"  # noqa: S608
+        row = self._conn.execute(sql, [source_id]).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    # ------------------------------------------------------------------
     # Sync state
     # ------------------------------------------------------------------
 

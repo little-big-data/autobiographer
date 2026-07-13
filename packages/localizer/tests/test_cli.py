@@ -575,3 +575,222 @@ def test_fetch_writes_dual_output_plugin_to_both_tables(tmp_db: Path) -> None:
 
     assert len(places_df) == 1
     assert len(events_df) == 1
+
+
+# ---------------------------------------------------------------------------
+# 15. Resumable sync (issue #109)
+# ---------------------------------------------------------------------------
+
+_LASTFM_ENV = {
+    "AUTOBIO_LASTFM_API_KEY": "dummy_key",
+    "AUTOBIO_LASTFM_API_SECRET": "dummy_secret",
+    "AUTOBIO_LASTFM_USERNAME": "dummy_user",
+}
+
+
+def _seed_lastfm_events(db_path: Path, n: int, base_timestamp: int) -> None:
+    """Seed `n` lastfm event rows at base_timestamp..base_timestamp+n-1, no sync_state."""
+    from localizer.store.db import LocalizerStore
+
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(
+            [
+                {
+                    "source_id": "lastfm",
+                    "timestamp": base_timestamp + i,
+                    "label": f"Artist{i}",
+                    "sublabel": f"Track{i}",
+                    "category": None,
+                    "raw_json": None,
+                    "fetched_at": int(time.time()),
+                }
+                for i in range(n)
+            ]
+        )
+
+
+def _scope_registry_to_lastfm() -> None:
+    """Return a callable that replaces load_builtin_plugins with a lastfm-only REGISTRY.
+
+    Keeps `sync` tests from touching any other (network-calling) plugin.
+    """
+    from localizer.plugins.lastfm.loader import LastFmPlugin
+
+    def _fake_load_builtin_plugins() -> None:
+        from localizer.plugins import REGISTRY  # noqa: PLC0415
+
+        REGISTRY.clear()
+        REGISTRY["lastfm"] = LastFmPlugin
+
+    return _fake_load_builtin_plugins
+
+
+def test_fetch_resumes_from_latest_committed_timestamp(tmp_db: Path) -> None:
+    """When no sync_state exists but the store already has committed rows for
+    this source (e.g. an interrupted first sync that wrote some batches but
+    never reached set_sync_state), `localizer fetch` must resume from the
+    newest already-committed timestamp instead of re-fetching everything."""
+    _seed_lastfm_events(tmp_db, n=10, base_timestamp=5_000_000)
+
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with patch(
+        "localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records",
+        _fake_fetch_records,
+    ):
+        result = runner.invoke(cli, ["fetch", "lastfm"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [5_000_009], (
+        f"Expected fetch to resume from the newest committed timestamp (5000009), "
+        f"got {captured_since}. CLI output: {result.output}"
+    )
+
+
+def test_sync_resumes_from_latest_committed_timestamp(tmp_db: Path) -> None:
+    """`localizer sync` must apply the same resumability floor as `fetch` —
+    resuming from the newest committed row when no sync_state exists yet."""
+    _seed_lastfm_events(tmp_db, n=5, base_timestamp=6_000_000)
+
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with (
+        patch("localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records", _fake_fetch_records),
+        patch("localizer.plugins.load_builtin_plugins", _scope_registry_to_lastfm()),
+    ):
+        result = runner.invoke(cli, ["sync"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [6_000_004], (
+        f"Expected sync to resume from the newest committed timestamp (6000004), "
+        f"got {captured_since}. CLI output: {result.output}"
+    )
+
+
+def test_resume_floor_prefers_committed_data_over_stale_sync_state(tmp_db: Path) -> None:
+    """The resumability floor must be based on actually-committed data, per the
+    issue #109 acceptance criteria — not on `sync_state.last_synced_at` — even
+    when a (stale or otherwise mismatched) sync_state row exists."""
+    from localizer.store.db import LocalizerStore
+
+    _seed_lastfm_events(tmp_db, n=1, base_timestamp=1_000)
+    with LocalizerStore(tmp_db) as store:
+        # last_synced_at is set far in the future relative to the committed
+        # data's own timestamp — the floor must still come from the data.
+        store.set_sync_state("lastfm", last_synced_at=9_999_999, record_count=1, status="ok")
+
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with patch(
+        "localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records",
+        _fake_fetch_records,
+    ):
+        result = runner.invoke(cli, ["fetch", "lastfm"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [1_000], (
+        f"Expected the floor to come from committed data (1000), not stale "
+        f"sync_state (9999999); got {captured_since}. CLI output: {result.output}"
+    )
+
+
+def test_fetch_first_ever_sync_has_no_since_floor(tmp_db: Path) -> None:
+    """A true first-ever fetch (empty store, no sync_state) must pass since=None,
+    unaffected by the new resumability floor logic."""
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with patch(
+        "localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records",
+        _fake_fetch_records,
+    ):
+        result = runner.invoke(cli, ["fetch", "lastfm"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [None], (
+        f"Expected since=None for a true first-ever sync, got {captured_since}. "
+        f"CLI output: {result.output}"
+    )
+
+
+def test_fetch_force_bypasses_resume_floor(tmp_db: Path) -> None:
+    """`localizer fetch <source> --force` must ignore both sync_state and any
+    already-committed data, fetching from the beginning (full rebuild)."""
+    from localizer.store.db import LocalizerStore
+
+    _seed_lastfm_events(tmp_db, n=1, base_timestamp=7_000_000)
+    with LocalizerStore(tmp_db) as store:
+        store.set_sync_state("lastfm", last_synced_at=7_500_000, record_count=1, status="ok")
+
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with patch(
+        "localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records",
+        _fake_fetch_records,
+    ):
+        result = runner.invoke(cli, ["fetch", "lastfm", "--force"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [None], (
+        f"Expected --force to bypass both sync_state and the committed-data "
+        f"floor, got since={captured_since}. CLI output: {result.output}"
+    )
+
+
+def test_sync_force_bypasses_resume_floor(tmp_db: Path) -> None:
+    """`localizer sync --force` must ignore stored state for every plugin and
+    perform a full rebuild."""
+    from localizer.store.db import LocalizerStore
+
+    _seed_lastfm_events(tmp_db, n=1, base_timestamp=8_000_000)
+    with LocalizerStore(tmp_db) as store:
+        store.set_sync_state("lastfm", last_synced_at=8_500_000, record_count=1, status="ok")
+
+    captured_since: list[int | None] = []
+
+    def _fake_fetch_records(self: Any, since: int | None = None, **_: Any) -> Any:
+        captured_since.append(since)
+        return iter([])
+
+    runner = CliRunner()
+    env = {**os.environ, "LOCALIZER_DB_PATH": str(tmp_db), **_LASTFM_ENV}
+    with (
+        patch("localizer.plugins.lastfm.loader.LastFmPlugin.fetch_records", _fake_fetch_records),
+        patch("localizer.plugins.load_builtin_plugins", _scope_registry_to_lastfm()),
+    ):
+        result = runner.invoke(cli, ["sync", "--force"], env=env)
+
+    assert result.exit_code == 0, result.output
+    assert captured_since == [None], (
+        f"Expected --force to bypass stored state, got since={captured_since}. "
+        f"CLI output: {result.output}"
+    )

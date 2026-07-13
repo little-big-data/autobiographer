@@ -569,3 +569,70 @@ def test_set_and_get_sync_state(tmp_path):
     assert state["last_cursor"] == "page5"
     assert state["status"] == "ok"
     assert state["record_count"] == 42
+
+
+# ---------------------------------------------------------------------------
+# 10. get_latest_timestamp (resumable-sync support, issue #109)
+# ---------------------------------------------------------------------------
+
+
+def test_get_latest_timestamp_returns_max_for_source(tmp_path):
+    """get_latest_timestamp returns the max timestamp among a source's events."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(_make_events(5, source_id="lastfm"))  # timestamps 1000..1004
+        latest = store.get_latest_timestamp("lastfm", table="events")
+
+    assert latest == 1004
+
+
+def test_get_latest_timestamp_none_when_no_rows(tmp_path):
+    """get_latest_timestamp returns None when the source has no rows in that table."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        latest = store.get_latest_timestamp("neversynced", table="events")
+
+    assert latest is None
+
+
+def test_get_latest_timestamp_scoped_to_source_id(tmp_path):
+    """get_latest_timestamp for one source ignores rows belonging to another source."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_events(_make_events(3, source_id="lastfm"))  # 1000..1002
+        store.upsert_events(
+            [
+                {
+                    "source_id": "other",
+                    "timestamp": 9999,
+                    "label": "X",
+                    "sublabel": None,
+                    "category": None,
+                    "raw_json": None,
+                    "fetched_at": int(time.time()),
+                }
+            ]
+        )
+        latest = store.get_latest_timestamp("lastfm", table="events")
+
+    assert latest == 1002
+
+
+def test_get_latest_timestamp_supports_places_table(tmp_path):
+    """get_latest_timestamp against table='places' reads from the places table."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_places(_make_places(4, source_id="swarm"))  # timestamps 2000..2003
+        latest = store.get_latest_timestamp("swarm", table="places")
+
+    assert latest == 2003
+
+
+def test_get_latest_timestamp_supports_content_table(tmp_path):
+    """get_latest_timestamp against table='content' reads from the content table."""
+    db_path = tmp_path / "store.duckdb"
+    with LocalizerStore(db_path) as store:
+        store.upsert_content(_make_content(3, source_id="feedly"))
+        latest = store.get_latest_timestamp("feedly", table="content")
+
+    assert latest is not None
