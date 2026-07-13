@@ -6,9 +6,12 @@ import datetime
 import random
 from datetime import timezone
 
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from pandas import DataFrame
 
+from analysis_utils import get_daily_activity
 from components.share import render_share_button
 from components.theme import (
     ACCENT_CYAN,
@@ -18,11 +21,20 @@ from components.theme import (
     ACCENT_PINK,
     ACCENT_PURPLE,
     ACCENT_YELLOW,
+    CALENDAR_HEATMAP_SCALE,
     TEXT_DIM,
     TEXT_PRIMARY,
+    apply_dark_theme,
+    card_container,
 )
 from core.time_machine import TimeMachineEntry, get_time_machine_entry
 from export_html import build_overview_page_html
+
+# Source-selector options for the activity calendar (issue #27) — order matters,
+# matches the `st.radio` display order and maps 1:1 to `get_daily_activity`'s
+# `source` argument.
+_ACTIVITY_SOURCE_OPTIONS = ["All activity", "Music", "Check-ins"]
+_ACTIVITY_SOURCE_MAP = {"All activity": "all", "Music": "music", "Check-ins": "checkins"}
 
 
 def _stat_html(value: str, label: str, color: str) -> str:
@@ -245,3 +257,107 @@ def render_overview() -> None:
 
     # ── Time Machine — "this day in history" (issue #98) ───────────────────
     render_time_machine_card(df, swarm_df)
+
+    # ── Activity calendar heatmap (issue #27) ───────────────────────────────
+    render_activity_calendar(df, swarm_df)
+
+
+def _build_calendar_heatmap_figure(activity_df: DataFrame) -> go.Figure:
+    """Build a GitHub-contribution-graph-style calendar heatmap figure.
+
+    Bins ``activity_df``'s ``date``/``value`` columns into a week-index
+    (x-axis, integer week offset from the overall min date) by day-of-week
+    (y-axis, Sunday-Saturday, GitHub convention) grid, and renders it as a
+    single ``go.Heatmap`` trace.
+
+    Args:
+        activity_df: Two-column DataFrame (``date``, ``value``) as returned by
+            ``analysis_utils.get_daily_activity`` — one row per calendar day,
+            zero-filled across the full date range, no gaps.
+
+    Returns:
+        A themed ``go.Figure`` with one ``go.Heatmap`` trace. Cells outside the
+        real date range (grid padding needed to complete whole weeks) are left
+        as ``NaN`` so they render as blank rather than a false zero; every real
+        day in ``activity_df`` lands in exactly one cell with its true value
+        (including genuine zero-activity days).
+    """
+    dates = pd.to_datetime(activity_df["date"])
+    values = activity_df["value"].to_numpy()
+
+    # GitHub convention: Sunday=0 ... Saturday=6. pandas' dayofweek is
+    # Monday=0 ... Sunday=6, so shift by one day and wrap.
+    day_of_week = (dates.dt.dayofweek + 1) % 7
+    grid_start = dates.iloc[0] - pd.Timedelta(days=int(day_of_week.iloc[0]))
+    week_index = ((dates - grid_start).dt.days // 7).to_numpy()
+
+    num_weeks = int(week_index.max()) + 1
+    z: list[list[float]] = [[float("nan")] * num_weeks for _ in range(7)]
+    text: list[list[str]] = [[""] * num_weeks for _ in range(7)]
+
+    for date, value, dow, week in zip(dates, values, day_of_week, week_index):
+        z[int(dow)][int(week)] = float(value)
+        text[int(dow)][int(week)] = f"{date.strftime('%Y-%m-%d')}<br>{int(value)} activities"
+
+    day_labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            text=text,
+            y=day_labels,
+            colorscale=CALENDAR_HEATMAP_SCALE,
+            zmin=0,
+            hovertemplate="%{text}<extra></extra>",
+            showscale=False,
+            xgap=2,
+            ygap=2,
+        )
+    )
+    fig.update_layout(
+        xaxis=dict(showticklabels=False, fixedrange=True),
+        yaxis=dict(autorange="reversed", fixedrange=True),
+        height=200,
+        margin=dict(l=40, r=10, t=10, b=10),
+    )
+    apply_dark_theme(fig)
+    return fig
+
+
+def render_activity_calendar(df: DataFrame | None, swarm_df: DataFrame | None) -> None:
+    """Render the full-year activity calendar heatmap card (issue #27).
+
+    Shows a GitHub-contribution-graph-style heatmap of daily activity
+    intensity, with an inline source selector (All activity / Music /
+    Check-ins) shown only when Swarm/Foursquare data is genuinely loaded
+    alongside the music data.
+
+    Args:
+        df: The Last.fm-shaped listening-history frame from
+            ``st.session_state['df']``.
+        swarm_df: The Foursquare/Swarm check-in frame from
+            ``st.session_state['swarm_df']``, or None if not loaded.
+    """
+    if df is None or df.empty:
+        return
+
+    has_swarm = swarm_df is not None and not swarm_df.empty
+    if has_swarm:
+        selection = st.radio(
+            "Activity source",
+            _ACTIVITY_SOURCE_OPTIONS,
+            index=0,
+            horizontal=True,
+        )
+        source = _ACTIVITY_SOURCE_MAP[selection]
+    else:
+        source = "all"
+
+    activity_df = get_daily_activity(df, swarm_df, source=source)
+    if activity_df.empty:
+        st.info("No activity data available for this selection yet.")
+        return
+
+    fig = _build_calendar_heatmap_figure(activity_df)
+    with card_container():
+        st.plotly_chart(fig, width="stretch")

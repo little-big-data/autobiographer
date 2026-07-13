@@ -966,6 +966,84 @@ def get_day_hour_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     return data.pivot(index="day_of_week", columns="hour", values="Plays").fillna(0)
 
 
+def get_daily_activity(
+    df: Optional[pd.DataFrame],
+    swarm_df: Optional[pd.DataFrame] = None,
+    source: str = "all",
+) -> pd.DataFrame:
+    """Prepare zero-filled per-day activity counts for the activity calendar heatmap.
+
+    Args:
+        df: Listening history with a ``date_text`` column (Last.fm), or None.
+        swarm_df: Check-in history with a ``timestamp`` column (Unix seconds,
+            Swarm/Foursquare), or None.
+        source: Which source(s) to include in the counts. One of ``"all"``,
+            ``"music"``, or ``"checkins"``.
+
+    Returns:
+        A two-column DataFrame (``date``: datetime64[ns], tz-naive midnight;
+        ``value``: int activity count), sorted ascending by ``date`` and
+        zero-filled across the full contiguous date range covered by the
+        selected source(s). Empty (0 rows, correct columns/dtypes) when the
+        input(s) relevant to ``source`` are None/empty.
+
+    Raises:
+        ValueError: If ``source`` is not one of ``"all"``, ``"music"``,
+            ``"checkins"``.
+    """
+    valid_sources = {"all", "music", "checkins"}
+    if source not in valid_sources:
+        raise ValueError(f"Invalid source {source!r}; expected one of {sorted(valid_sources)}")
+
+    empty_result = pd.DataFrame(
+        {"date": pd.Series(dtype="datetime64[ns]"), "value": pd.Series(dtype="int64")}
+    )
+
+    music_counts: Optional[pd.Series] = None
+    if source in ("all", "music") and df is not None and not df.empty and "date_text" in df.columns:
+        music_counts = df["date_text"].dt.date.value_counts()
+
+    checkins_counts: Optional[pd.Series] = None
+    if (
+        source in ("all", "checkins")
+        and swarm_df is not None
+        and not swarm_df.empty
+        and "timestamp" in swarm_df.columns
+    ):
+        checkins_counts = pd.to_datetime(
+            swarm_df["timestamp"], unit="s", utc=True
+        ).dt.date.value_counts()
+
+    combined: Optional[pd.Series]
+    if source == "music":
+        combined = music_counts
+    elif source == "checkins":
+        combined = checkins_counts
+    else:  # "all"
+        if music_counts is None and checkins_counts is None:
+            combined = None
+        else:
+            combined = pd.Series(dtype="int64")
+            if music_counts is not None:
+                combined = combined.add(music_counts, fill_value=0)
+            if checkins_counts is not None:
+                combined = combined.add(checkins_counts, fill_value=0)
+
+    if combined is None or combined.empty:
+        return empty_result
+
+    full_range = pd.date_range(start=min(combined.index), end=max(combined.index), freq="D")
+    combined = combined.reindex(full_range.date, fill_value=0)
+
+    result = pd.DataFrame(
+        {
+            "date": pd.to_datetime(list(combined.index)),
+            "value": combined.to_numpy().astype("int64"),
+        }
+    )
+    return result.sort_values("date").reset_index(drop=True)
+
+
 def get_genre_weekly(df: pd.DataFrame, n: int = 8) -> pd.DataFrame:
     """Return weekly scrobble counts for the top N artists.
 
