@@ -46,6 +46,18 @@ This means:
 - Editing `default_assumptions.json` takes effect the next time you open the dashboard — no sync needed.
 - The `places` table only contains explicit check-ins; inferred locations are computed on the fly.
 
+**Name-based `place_type` fallback (Swarm/Foursquare).** Real Foursquare/Swarm exports
+frequently ship an empty `categories` array on every venue, which used to leave
+`place_type` (and downstream `venue_category`) empty for every check-in — silently
+breaking category-dependent features like the dining soundtrack view and transit-day
+detection. `SwarmPlugin.fetch_records()` now falls back to inferring a `place_type` from
+the venue **name** (e.g. matching `"airport"`, `"pizza"`, `"metro station"`, `"coffee"`)
+whenever `categories` is empty or missing. This name-based fallback is a heuristic and
+therefore only an **approximation** — it is a lower-fidelity substitute used only when
+real category data is unavailable. Whenever a checkin's `categories` array is
+non-empty, that real Foursquare category data is always preferred and completely
+unaffected by this fallback.
+
 ---
 
 ## Installation
