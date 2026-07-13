@@ -329,3 +329,213 @@ def test_fetch_records_fetched_at_is_recent(tmp_path: Path) -> None:
     assert before - 5 <= fetched_at <= after + 5, (
         f"fetched_at {fetched_at} not close to now ({before}–{after})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Subtask 1 (issue #93): name-based venue-category heuristic
+#
+# These tests target `_infer_place_type_from_name(venue_name: str) -> str`,
+# a new private, pure module-level function in
+# `packages/localizer/src/localizer/plugins/swarm/loader.py`. It is not wired
+# into `fetch_records()` yet (that is Subtask 2) — these tests call the
+# function directly.
+#
+# Reference vocabulary (copied from handoff.md's Task Overview, itself copied
+# from analysis_utils.py, so these tests do not depend on analysis_utils
+# imports and stay isolated per CLAUDE.md's test-isolation conventions):
+#   _CATEGORY_RULES buckets (lowercase substrings):
+#     Fast Food:  fast food, burger, pizza, fried chicken, hot dog, sandwich
+#     Bars:       bar, nightclub, pub, brewery, wine, cocktail, lounge, club
+#     Cafes:      cafe, café, coffee, tea room, bakery, dessert, ice cream,
+#                 juice bar
+#     Restaurant: restaurant, diner, food, sushi, ramen, noodle, steakhouse,
+#                 bbq, seafood, bistro, brasserie, tapas, dim sum, buffet,
+#                 grill, kitchen, eatery
+#   TRANSIT_CATEGORY_KEYWORDS (matched case-insensitively):
+#     Airport, Train Station, Transit, Bus Station, Metro, Subway, Ferry,
+#     Port, Rail, Rest Area, Rest Stop, Travel Plaza, Service Plaza,
+#     Turnpike, Toll, Gas Station, Truck Stop
+# ---------------------------------------------------------------------------
+
+_TRANSIT_KEYWORDS_LOWER = frozenset(
+    {
+        "airport",
+        "train station",
+        "transit",
+        "bus station",
+        "metro",
+        "subway",
+        "ferry",
+        "port",
+        "rail",
+        "rest area",
+        "rest stop",
+        "travel plaza",
+        "service plaza",
+        "turnpike",
+        "toll",
+        "gas station",
+        "truck stop",
+    }
+)
+
+
+def _contains_any(haystack_lower: str, needles: set[str]) -> bool:
+    """Return True if any needle substring is present in haystack_lower."""
+    return any(needle in haystack_lower for needle in needles)
+
+
+def test_infer_place_type_from_name_airport() -> None:
+    """An airport-style venue name must synthesize a place_type containing 'Airport'."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("O'Hare International Airport")
+    assert "Airport" in result, f"Expected 'Airport' substring, got {result!r}"
+
+
+def test_infer_place_type_from_name_train_or_metro_station() -> None:
+    """A metro/train-station-style venue name must synthesize a transit-keyword place_type."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("Downtown Metro Station")
+    assert result != "", "Expected a non-empty synthesized place_type"
+    assert _contains_any(result.lower(), _TRANSIT_KEYWORDS_LOWER), (
+        f"Expected a transit keyword substring (e.g. 'Metro'), got {result!r}"
+    )
+
+
+def test_infer_place_type_from_name_pizza() -> None:
+    """A pizza-style venue name must synthesize a place_type containing 'pizza' (lowercased)."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("Joe's Pizza Place")
+    assert "pizza" in result.lower(), f"Expected 'pizza' substring, got {result!r}"
+
+
+def test_infer_place_type_from_name_coffee() -> None:
+    """A coffee/cafe-style venue name must synthesize a place_type containing 'coffee'."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("Downtown Coffee Roasters")
+    assert "coffee" in result.lower(), f"Expected 'coffee' substring, got {result!r}"
+
+
+def test_infer_place_type_from_name_bar_or_pub() -> None:
+    """A bar/pub-style venue name must synthesize a place_type from the Bars & Nightlife bucket."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    bars_bucket = {
+        "bar",
+        "nightclub",
+        "pub",
+        "brewery",
+        "wine",
+        "cocktail",
+        "lounge",
+        "club",
+    }
+    result = _infer_place_type_from_name("The Rusty Anchor Pub")
+    assert result != "", "Expected a non-empty synthesized place_type"
+    assert _contains_any(result.lower(), bars_bucket), (
+        f"Expected a Bars & Nightlife keyword substring (e.g. 'pub'), got {result!r}"
+    )
+
+
+def test_infer_place_type_from_name_restaurant() -> None:
+    """A restaurant-style venue name must synthesize a place_type from the Restaurants bucket."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    restaurant_bucket = {
+        "restaurant",
+        "diner",
+        "food",
+        "sushi",
+        "ramen",
+        "noodle",
+        "steakhouse",
+        "bbq",
+        "seafood",
+        "bistro",
+        "brasserie",
+        "tapas",
+        "dim sum",
+        "buffet",
+        "grill",
+        "kitchen",
+        "eatery",
+    }
+    result = _infer_place_type_from_name("Golden Dragon Restaurant")
+    assert result != "", "Expected a non-empty synthesized place_type"
+    assert _contains_any(result.lower(), restaurant_bucket), (
+        f"Expected a Restaurants keyword substring (e.g. 'restaurant'), got {result!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "venue_name",
+    ["Generic City Museum", "Downtown Art Gallery"],
+)
+def test_infer_place_type_from_name_no_match_returns_empty_string(venue_name: str) -> None:
+    """A non-food/non-transit venue name must return exactly '' (never None, never raises)."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name(venue_name)
+    assert result == "", f"Expected exactly '', got {result!r}"
+    assert result is not None
+
+
+def test_infer_place_type_from_name_false_positive_portland_pizza() -> None:
+    """'Portland Pizza Co.' must classify as pizza/dining, not trip a bare 'port' transit rule.
+
+    This guards the Task Overview's non-overlap constraint: the rule table must
+    not contain a bare "port" name-pattern rule, since "Portland" would then
+    false-positive as transit ("Port").
+    """
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("Portland Pizza Co.")
+    assert "pizza" in result.lower(), (
+        f"Expected 'pizza' substring (dining classification), got {result!r}"
+    )
+    assert "port" not in result.lower(), (
+        f"Synthesized place_type must not contain a bare 'port' transit false-positive, "
+        f"got {result!r}"
+    )
+
+
+def test_infer_place_type_from_name_case_insensitive_all_lowercase() -> None:
+    """Matching must be case-insensitive: an all-lowercase venue name still matches."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("downtown metro station")
+    assert result != "", "Expected all-lowercase input to still match the transit heuristic"
+    assert _contains_any(result.lower(), _TRANSIT_KEYWORDS_LOWER), (
+        f"Expected a transit keyword substring, got {result!r}"
+    )
+
+
+def test_infer_place_type_from_name_case_insensitive_mixed_case() -> None:
+    """Matching must be case-insensitive: a mixed/upper-case venue name still matches."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("DOWNTOWN COFFEE ROASTERS")
+    assert "coffee" in result.lower(), f"Expected 'coffee' substring, got {result!r}"
+
+
+def test_infer_place_type_from_name_empty_string_returns_empty_and_does_not_raise() -> None:
+    """An empty venue name must return '' and must not raise."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name("")
+    assert result == "", f"Expected '', got {result!r}"
+
+
+@pytest.mark.parametrize("venue_name", ["   ", "!!!", "...,", "---"])
+def test_infer_place_type_from_name_punctuation_only_returns_empty_and_does_not_raise(
+    venue_name: str,
+) -> None:
+    """A venue name containing only punctuation/whitespace must return '' and not raise."""
+    from localizer.plugins.swarm.loader import _infer_place_type_from_name
+
+    result = _infer_place_type_from_name(venue_name)
+    assert result == "", f"Expected '', got {result!r}"

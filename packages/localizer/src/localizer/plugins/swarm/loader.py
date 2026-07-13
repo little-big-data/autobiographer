@@ -15,6 +15,108 @@ from typing import Any
 from localizer.plugins import register
 from localizer.plugins.base import FetchMode, OutputTable, SourcePlugin
 
+# Name-pattern rule table for `_infer_place_type_from_name()` (issue #93).
+#
+# Real Foursquare/Swarm exports frequently ship an empty `categories` array on
+# venue objects, which makes the downstream `place_type` always `""`. As a
+# fallback (used only when `categories` is empty/missing — see
+# `fetch_records()`), this table matches lowercase substrings of the venue
+# *name* against Foursquare/Swarm naming conventions and synthesizes a
+# `place_type` string.
+#
+# Every synthesized value below intentionally reuses a substring from either
+# `analysis_utils._CATEGORY_RULES` (dining/nightlife buckets) or
+# `analysis_utils.TRANSIT_CATEGORY_KEYWORDS` (transit), so the existing
+# downstream classifiers recognize the synthesized value unchanged with zero
+# changes to `analysis_utils.py`.
+#
+# Rules are checked in order; the first match wins. Deliberately excludes a
+# bare "port" rule (would false-positive on names like "Portland" or "Import
+# Foods") and a bare "club" rule (too generic) — see handoff.md's Task
+# Overview non-overlap constraint for issue #93.
+_NAME_HEURISTIC_RULES: list[tuple[str, str]] = [
+    # Transit (mirrors TRANSIT_CATEGORY_KEYWORDS)
+    ("airport", "Airport"),
+    ("train station", "Train Station"),
+    ("metro station", "Metro Station"),
+    ("subway station", "Subway Station"),
+    ("bus station", "Bus Station"),
+    ("ferry terminal", "Ferry"),
+    ("rail station", "Rail Station"),
+    ("gas station", "Gas Station"),
+    ("truck stop", "Truck Stop"),
+    ("rest area", "Rest Area"),
+    ("rest stop", "Rest Stop"),
+    ("travel plaza", "Travel Plaza"),
+    ("service plaza", "Service Plaza"),
+    ("turnpike", "Turnpike"),
+    ("toll plaza", "Toll"),
+    # Dining / nightlife (mirrors _CATEGORY_RULES buckets)
+    ("pizza", "Pizza"),
+    ("burger", "Burger"),
+    ("fried chicken", "Fried Chicken"),
+    ("hot dog", "Hot Dog"),
+    ("sandwich", "Sandwich"),
+    ("brewery", "Brewery"),
+    ("nightclub", "Nightclub"),
+    ("pub", "Pub"),
+    ("wine bar", "Wine Bar"),
+    ("cocktail", "Cocktail Bar"),
+    ("lounge", "Lounge"),
+    ("coffee", "Coffee"),
+    ("café", "Cafe"),
+    ("cafe", "Cafe"),
+    ("tea room", "Tea Room"),
+    ("bakery", "Bakery"),
+    ("ice cream", "Ice Cream"),
+    ("juice bar", "Juice Bar"),
+    ("restaurant", "Restaurant"),
+    ("diner", "Diner"),
+    ("sushi", "Sushi"),
+    ("ramen", "Ramen"),
+    ("noodle", "Noodle"),
+    ("steakhouse", "Steakhouse"),
+    ("bbq", "BBQ"),
+    ("seafood", "Seafood"),
+    ("bistro", "Bistro"),
+    ("brasserie", "Brasserie"),
+    ("tapas", "Tapas"),
+    ("dim sum", "Dim Sum"),
+    ("buffet", "Buffet"),
+    ("grill", "Grill"),
+    ("kitchen", "Kitchen"),
+    ("eatery", "Eatery"),
+]
+
+
+def _infer_place_type_from_name(venue_name: str) -> str:
+    """Infer a synthesized ``place_type`` from a venue name via keyword heuristics.
+
+    Used as a fallback when a Swarm/Foursquare export's ``categories`` array is
+    empty or missing (issue #93). Checks ``venue_name`` (lower-cased) against
+    ``_NAME_HEURISTIC_RULES`` in order and returns the first matching rule's
+    synthesized value. Every synthesized value contains a substring already
+    recognized by ``analysis_utils._CATEGORY_RULES`` or
+    ``analysis_utils.TRANSIT_CATEGORY_KEYWORDS``, so downstream classifiers
+    work unchanged.
+
+    Args:
+        venue_name: The raw venue name string from the Swarm export. May be
+            empty or contain only punctuation/whitespace.
+
+    Returns:
+        The synthesized place_type string, or ``""`` if no rule matches (never
+        ``None``, never raises).
+    """
+    if not venue_name:
+        return ""
+
+    name_lower = venue_name.lower()
+    for needle, result in _NAME_HEURISTIC_RULES:
+        if needle in name_lower:
+            return result
+    return ""
+
 
 @register
 class SwarmPlugin(SourcePlugin):
@@ -164,9 +266,10 @@ class SwarmPlugin(SourcePlugin):
 
                 place_name = venue.get("name", "")
                 categories = venue.get("categories", [])
-                place_type = ""
                 if categories:
                     place_type = categories[0].get("name", "")
+                else:
+                    place_type = _infer_place_type_from_name(place_name)
 
                 yield {
                     "source_id": "swarm",
